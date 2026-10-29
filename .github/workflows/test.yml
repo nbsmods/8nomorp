@@ -1,0 +1,17 @@
+name: Tests
+on: [push, pull_request]
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install build dependencies
+        run: sudo apt-get update && sudo apt-get install -y build-essential cmake git zlib1g-dev
+      - name: Build and test
+        run: make -j2 JOBS=2 && make test
+      - name: Python tests
+        run: python3 -m unittest discover -s tools -p 'test_*.py'
+      - name: CLI smoke check
+        run: ./8nomorp --help

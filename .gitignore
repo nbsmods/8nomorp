@@ -1,0 +1,61 @@
+# build artifacts
+*.o
+/lbts
+/8nomorp
+/test-promon
+/test-ctxgen
+/test-apk
+/test-guest-runtime
+/probe-native
+/build/
+/ext/
+/ctxgen/
+__pycache__/
+*.pyc
+*.out
+*.err
+test
+
+# libraries and packages
+*.so
+*.dat
+*.apk
+*.xapk
+*.aab
+*.dex
+*.idsig
+*.jks
+*.keystore
+*.p12
+*.pfx
+*.pem
+*.key
+.env
+.env.*
+
+# binary dumps and intermediate data
+*.bin
+*.log
+unpack_out/
+tools/unpack_out/
+targets/*/apks/
+targets/*/extracted/
+targets/*/*.bin
+
+# IDA databases and temp tools
+*.id0
+*.id1
+*.id2
+*.nam
+*.til
+tools/ctxscan
+tools/enum16
+tools/enumruns
+
+
+# dex patcher
+dex/node_modules/
+dex/input/
+dex/output/
+dex/fields.json
+dex/strings.json

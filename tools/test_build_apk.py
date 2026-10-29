@@ -1,0 +1,71 @@
+#!/usr/bin/env python3
+"""Synthetic packaging/CLI fixtures; no proprietary inputs needed."""
+import argparse
+import io
+from pathlib import Path
+import struct
+import tempfile
+import unittest
+from unittest.mock import patch
+import zipfile
+
+import build_apk
+
+
+def archive_bytes(entries):
+    stream = io.BytesIO()
+    with zipfile.ZipFile(stream, 'w') as archive:
+        for name, data in entries.items():
+            archive.writestr(name, data)
+    return stream.getvalue()
+
+
+class BuildTests(unittest.TestCase):
+    def test_protected_loader_requires_matching_init(self):
+        data = bytearray(512)
+        data[:6] = b'\x7fELF\x02\x01'
+        struct.pack_into('<QQ', data, 24, 256, 64)
+        struct.pack_into('<HH', data, 54, 56, 2)
+        struct.pack_into('<II6Q', data, 64, 1, 5, 0, 0, 0, 512, 512, 4096)
+        struct.pack_into('<II6Q', data, 120, 2, 6, 192, 192, 0, 32, 32, 8)
+        struct.pack_into('<QQ', data, 192, 12, 256)
+        data[256:288] = bytes.fromhex('fd7bb1a9fd030091e00701a9e20f02a9e41703a9e61f04a9e82705a9ea2f06a9')
+        self.assertTrue(build_apk.protected_loader(data))
+        struct.pack_into('<Q', data, 200, 260)
+        self.assertFalse(build_apk.protected_loader(data))
+        self.assertFalse(build_apk.protected_loader(b'not an ELF'))
+
+    def test_xapk_and_config_discovery(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            xapk = root / 'input.xapk'
+            base = archive_bytes({'assets/random-name.bin': b'lbtsfixture'})
+            native = archive_bytes({'lib/arm64-v8a/libg.so': b'game',
+                                    'lib/arm64-v8a/libsupercell_brawlstars.so': b'shield'})
+            xapk.write_bytes(archive_bytes({'manifest.json': b'{"package_name":"com.example.app"}',
+                                           'com.example.app.apk': base,
+                                           'config.arm64_v8a.apk': native,
+                                           'install_time_asset_pack.apk': archive_bytes({})}))
+            args = argparse.Namespace(output=root / 'out.apk', xapk=xapk, base=None,
+                                      native_split=None, asset_pack=None, dat=None,
+                                      shield=None, apktool='apktool')
+
+            def stop_at_build(command, env=None):
+                self.assertEqual(args.dat.read_bytes(), b'lbtsfixture')
+                self.assertEqual(args.shield.read_bytes(), b'shield')
+                self.assertIn('-Xmx2g', env['_JAVA_OPTIONS'])
+                raise RuntimeError('fixture inspected')
+
+            with patch.object(build_apk, 'run_cmd', side_effect=stop_at_build):
+                with self.assertRaisesRegex(RuntimeError, 'fixture inspected'):
+                    build_apk.run(args)
+            self.assertEqual(list(root.iterdir()), [xapk])
+
+    def test_signing_password_not_logged(self):
+        with patch('builtins.print') as printer, patch.object(build_apk.subprocess, 'run'):
+            build_apk.run_cmd(['apksigner', '--ks-pass', 'pass:private-value'])
+        self.assertNotIn('private-value', str(printer.call_args))
+
+
+if __name__ == '__main__':
+    unittest.main()
