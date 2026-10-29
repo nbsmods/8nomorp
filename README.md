@@ -75,26 +75,3 @@ accepts plaintext after authentication and padding validation. `src/promon.c`
 patches matched smali fields, strings, registrations, and native methods. Native
 export discovers and verifies resolver call sites before writing the output.
 Unsupported or ambiguous layouts fail closed; LBTS encryption is not supported.
-
-## Scope and validation
-
-This is not a universal Android unpacker. The offline Android/JNI fixture models
-known protector behavior and still has compatibility assumptions and a small
-number of audited class-specific callbacks. APK package metadata is not a promise
-of support. No APKs, shield binaries, keystores, credentials, or decrypted game
-assets are included. Version-specific test hashes are regression fixtures, not
-runtime acceptance allowlists.
-
-Run the Waydroid monitor with:
-
-```sh
-python3 tools/smoke_waydroid.py --package com.example.app \
-  --component com.example.app/.MainActivity --duration 45 --output runtime-check
-```
-
-`tools/` contains the APK workflow and its regression tests; it is not a runtime
-dependency of the core C executable. `make test-native-verifier`,
-`make test-apk-assembly`, `make test-release-runner`, and
-`make test-runtime-monitor` run focused checks. Release/Waydroid tests require
-their own inputs and environment. Run the Python unit suite with
-`python3 -m unittest discover -s tools -p 'test_*.py'`.
