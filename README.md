@@ -85,9 +85,7 @@ of support. No APKs, shield binaries, keystores, credentials, or decrypted game
 assets are included. Version-specific test hashes are regression fixtures, not
 runtime acceptance allowlists.
 
-A successful build or offline verification does **not** establish device startup,
-login, server connectivity, or gameplay compatibility. The optional Waydroid
-monitor checks process survival only:
+Run the Waydroid monitor with:
 
 ```sh
 python3 tools/smoke_waydroid.py --package com.example.app \
@@ -100,6 +98,3 @@ dependency of the core C executable. `make test-native-verifier`,
 `make test-runtime-monitor` run focused checks. Release/Waydroid tests require
 their own inputs and environment. Run the Python unit suite with
 `python3 -m unittest discover -s tools -p 'test_*.py'`.
-
-Licensing is unchanged; no open-source license has been added. Unicorn and other
-dependencies retain their own licenses.
