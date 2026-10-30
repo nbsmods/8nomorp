@@ -595,7 +595,7 @@ static int emu_sscanf(emu_t *e, uint64_t s_addr, uint64_t fmt_addr){
                 while(si < sl && strchr(" \t\n\r", s[si])) si++;
             } else if(si < sl && s[si] == c){
                 si++;
-            }
+            } else break;
             fi++;
             continue;
         }
@@ -618,11 +618,11 @@ static int emu_sscanf(emu_t *e, uint64_t s_addr, uint64_t fmt_addr){
             }
             continue;
         }
-        if(strchr("dxXuo", conv)){
-            int neg = 0, base = (conv=='x'||conv=='X') ? 16 : conv=='o' ? 8 : 10;
+        if(strchr("dixXuo", conv)){
+            int neg = 0, base = (conv=='x'||conv=='X') ? 16 : conv=='o' ? 8 : conv=='i' ? 0 : 10;
             if(si < sl && (s[si]=='+'||s[si]=='-')){ neg = s[si]=='-'; si++; }
             size_t start = si;
-            if(base == 16 && si+1 < sl && s[si]=='0' && (s[si+1]=='x'||s[si+1]=='X')) si += 2;
+            if((base == 16||base == 0) && si+1 < sl && s[si]=='0' && (s[si+1]=='x'||s[si+1]=='X')) si += 2;
             while(si < sl && strchr("0123456789abcdefABCDEF", s[si])) si++;
             if(si == start) break;
             char tmp[128]; size_t l = si-start < 120 ? si-start : 120;
@@ -662,6 +662,7 @@ static int emu_sscanf(emu_t *e, uint64_t s_addr, uint64_t fmt_addr){
             }
         }
     }
+    VLOG("    [guest sscanf] %.80s <- %.160s => %d\n",fmt,s,matches);
     return matches;
 }
 
@@ -1322,6 +1323,18 @@ static void dispatch_import(emu_t *e, const char *name){
              * silently swallow Java failure reporters or native callbacks. */
             if(!strcmp(owner,"android/os/Process")&&!strcmp(method,"setArgV0")) RET0();
             fprintf(stderr,"error: unsupported JNI static-void call %s.%s\n",owner,method);
+            if(g_verbose){
+                uint64_t argument=index==141?a3:jni_first_arg(e,a3,index==142);
+                char value[128]="";read_cstr(e,argument,value,sizeof value);
+                VLOG("    [JNI static-void first argument] %s\n",value);
+                uint64_t fp=rdreg(uc,R_X29),frame[2];
+                for(unsigned i=0;i<16&&fp;i++){
+                    if(uc_mem_read(uc,fp,frame,sizeof frame))break;
+                    VLOG("    [JNI failure frame] 0x%llx\n",(unsigned long long)frame[1]);
+                    if(frame[0]<=fp)break;
+                    fp=frame[0];
+                }
+            }
             e->stop=1;uc_emu_stop(uc);return;
         }
         if(index==62 || index==63){
@@ -1645,7 +1658,17 @@ static void dispatch_import(emu_t *e, const char *name){
         int r = strcmp(s1, s2);
         RET((uint64_t)(r > 0 ? 1 : r < 0 ? -1 : 0));
     }
-    if(!strcmp(name, "strncmp") || !strcmp(name, "strcasecmp")) RET0();
+    if(!strcmp(name,"strncmp") || !strcmp(name,"strcasecmp")){
+        char left[8192],right[8192];read_cstr(e,a0,left,sizeof left);read_cstr(e,a1,right,sizeof right);
+        if(!strcmp(name,"strncmp"))RET((uint64_t)(int64_t)strncmp(left,right,(size_t)a2));
+        size_t i=0;
+        for(;;i++){
+            unsigned char l=(unsigned char)left[i],r=(unsigned char)right[i];
+            if(l>='A'&&l<='Z')l+='a'-'A';
+            if(r>='A'&&r<='Z')r+='a'-'A';
+            if(l!=r||!l)RET((uint64_t)(int64_t)((int)l-(int)r));
+        }
+    }
     if(!strcmp(name, "strlen")){
         static char sb[4096];
         RET((uint64_t)read_cstr(e, a0, sb, sizeof sb));
@@ -1695,7 +1718,33 @@ static void dispatch_import(emu_t *e, const char *name){
         if(length<0){e->stop=1;uc_emu_stop(uc);return;}
         RET((uint64_t)length);
     }
-    if(!strcmp(name,"snprintf") || !strcmp(name,"asprintf") || !strcmp(name,"vasprintf")) RET0();
+    if(!strcmp(name,"snprintf") || !strcmp(name,"__snprintf_chk")){
+        int checked=!strcmp(name,"__snprintf_chk");
+        if(checked&&a1>a3){e->stop=1;uc_emu_stop(uc);return;}
+        unsigned first=checked?5:3;
+        uint64_t storage=MISC_BASE+0x805000,registers[8]={0};
+        for(unsigned i=first;i<8;i++)registers[i-first]=rdreg(uc,UC_ARM64_REG_X0+i);
+        guest_va_t ap={0};ap.stack=rdreg(uc,R_SP);
+        ap.gr_top=storage+64+8*(8-first);ap.gr_offs=-(int32_t)(8*(8-first));
+        if(uc_mem_write(uc,storage,&ap,sizeof ap)||uc_mem_write(uc,storage+64,registers,8*(8-first))){e->stop=1;uc_emu_stop(uc);return;}
+        int length=guest_vsnprintf(e,a0,a1,checked?rdreg(uc,UC_ARM64_REG_X4):a2,storage);
+        if(length<0){e->stop=1;uc_emu_stop(uc);return;}
+        RET((uint64_t)length);
+    }
+    if(!strcmp(name,"asprintf") || !strcmp(name,"vasprintf")){
+        uint64_t va=a2,storage=MISC_BASE+0x805000;
+        if(!strcmp(name,"asprintf")){
+            uint64_t registers[6];
+            for(unsigned i=0;i<6;i++)registers[i]=rdreg(uc,UC_ARM64_REG_X0+2+i);
+            guest_va_t ap={0};ap.stack=rdreg(uc,R_SP);ap.gr_top=storage+64+sizeof registers;ap.gr_offs=-(int32_t)sizeof registers;
+            if(uc_mem_write(uc,storage,&ap,sizeof ap)||uc_mem_write(uc,storage+64,registers,sizeof registers)){e->stop=1;uc_emu_stop(uc);return;}
+            va=storage;
+        }
+        uint64_t result=heap_alloc(e,16384,0);
+        int length=guest_vsnprintf(e,result,16384,a1,va);
+        if(length<0||uc_mem_write(uc,a0,&result,8)){e->stop=1;uc_emu_stop(uc);return;}
+        RET((uint64_t)length);
+    }
     if(!strcmp(name, "sscanf"))                    RET((uint64_t)emu_sscanf(e, a0, a1));
     if(!strcmp(name, "vsscanf"))                   RET0();
     if(!strcmp(name, "strerror") || !strcmp(name, "strerror_r")) RET0();
@@ -2301,9 +2350,10 @@ static int run_unpack(emu_t *e){
     const uint64_t chunk = 2000000ULL;
     int phase = 1;
     uint64_t phase2_start = 0;
+    const uint64_t total_budget=e->startup_budget?e->startup_budget+600000000ULL:600000000ULL;
     time_t t0 = time(NULL);
     setup_regs(e->uc, entry, SENT_CTOR, 0, STACK_TOP - 0x1000, 0);
-    while(!e->stop && phase <= 2 && e->insn_count < 600000000ULL && time(NULL) - t0 < 900){
+    while(!e->stop && phase <= 2 && e->insn_count < total_budget && time(NULL) - t0 < 900){
         uc_err rc = uc_emu_start(e->uc, entry, 0, 0, chunk);
         e->insn_count += chunk;
         uint64_t pc = rdreg(e->uc, R_PC);
@@ -2399,7 +2449,7 @@ static int run_unpack(emu_t *e){
         VLOG("[!] process exited during JNI_OnLoad; keeping what it produced\n");
         e->stop = 0;
     }
-    if(e->insn_count >= 600000000ULL || time(NULL) - t0 >= 900){
+    if(e->insn_count >= total_budget || time(NULL) - t0 >= 900){
         fprintf(stderr, "error: startup emulation exceeded budget\n");
         return -1;
     }

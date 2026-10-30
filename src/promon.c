@@ -357,6 +357,16 @@ int promon_patch(const char *input, const char *output, const struct promon_conf
         }
     }
     if(!registrar){ fprintf(stderr, "error: cannot discover native registrar\n"); goto error; }
+    if(!strcmp(registrar,resolver)){
+        /* The direct-registrar layout binds helper natives in JNI_OnLoad,
+         * rather than through each helper's Java class initializer. Its
+         * isolated protector namespace is derived from the string resolver. */
+        const char *slash=strrchr(resolver,'/');
+        if(!slash){fprintf(stderr,"error: direct registrar has no isolated namespace\n");goto error;}
+        size_t prefix=(size_t)(slash-resolver+1);
+        for(size_t i=0;i<all.count;i++)
+            if(all.items[i].name&&!strncmp(all.items[i].name,resolver,prefix))all.items[i].native_class=1;
+    }
     for(size_t i = 0; i < all.count; i++) for(size_t j = 0; j < all.items[i].nlines; j++){
         if(!registration(all.items[i].lines[j])) continue;
         char *target = descriptor(all.items[i].lines[j]);

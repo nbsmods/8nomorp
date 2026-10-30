@@ -26,5 +26,25 @@ int main(void){
     e->tracer_pid=0;status=path_content(e,"/proc/self/status",&length);
     assert(strstr(status,"TracerPid:\t0\n"));
     assert(path_content(e,"/proc/1234/task",&length)&&length==0);
+    /* Older shields use scanf's auto-base %i for TracerPid. */
+    write_cstr(e,0x10000,"TracerPid: 4096");write_cstr(e,0x10200,"TracerPid: %i");
+    wrreg(e->uc,R_X2,0x10400);wrreg(e->uc,R_SP,0x18000);
+    assert(emu_sscanf(e,0x10000,0x10200)==1);
+    uint32_t parsed=0;uc_mem_read(e->uc,0x10400,&parsed,4);assert(parsed==4096);
+    write_cstr(e,0x10000,"PPid: 500");assert(emu_sscanf(e,0x10000,0x10200)==0);
+    write_cstr(e,0x10000,"TracerPid: 0x1000");assert(emu_sscanf(e,0x10000,0x10200)==1);
+    uc_mem_read(e->uc,0x10400,&parsed,4);assert(parsed==4096);
+    /* Direct variadic snprintf/asprintf must consume X registers correctly. */
+    assert(!uc_mem_map(e->uc,MISC_BASE+0x805000,0x2000,UC_PROT_ALL));
+    assert(!uc_mem_map(e->uc,HEAP_BASE,0x10000,UC_PROT_ALL));e->heap_next=HEAP_BASE;
+    write_cstr(e,0x10000,"/proc/%i/status");
+    wrreg(e->uc,R_X0,0x14000);wrreg(e->uc,R_X1,128);wrreg(e->uc,R_X2,0x10000);
+    wrreg(e->uc,UC_ARM64_REG_X3,1234);wrreg(e->uc,R_X30,0x19000);
+    dispatch_import(e,"snprintf");assert(rdreg(e->uc,R_X0)==17);
+    uc_mem_read(e->uc,0x14000,buffer,sizeof buffer);assert(!strcmp(buffer,"/proc/1234/status"));
+    wrreg(e->uc,R_X0,0x13000);wrreg(e->uc,R_X1,0x10000);wrreg(e->uc,R_X2,1234);
+    dispatch_import(e,"asprintf");assert(rdreg(e->uc,R_X0)==17);
+    uint64_t allocated=0;uc_mem_read(e->uc,0x13000,&allocated,8);
+    uc_mem_read(e->uc,allocated,buffer,sizeof buffer);assert(!strcmp(buffer,"/proc/1234/status"));
     uc_close(e->uc);free(e);puts("guest runtime regression tests passed");return 0;
 }
