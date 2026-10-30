@@ -133,6 +133,7 @@ typedef struct emu {
     uint64_t   clock_ns;
     uint64_t   startup_budget; /* zero selects the context generator's default */
     uint64_t   thread_values[MAX_THREADS+1][128];
+    int        yield_workers; /* main condition wait gives runnable workers a quantum */
     unsigned   next_key;
     phdr_call_t phdr_calls[MAX_THREADS+1][8];
     unsigned phdr_depth[MAX_THREADS+1];
@@ -316,6 +317,23 @@ static uint64_t stub_for(emu_t *e, const char *name){
 /* ------------------------------------------------------------------ */
 /* fake system files                                                   */
 
+typedef struct { const char *package,*apk,*native,*data,*files,*cache,*comm; } game_t;
+#define GAME(n) {"com.supercell." n,"/data/app/com.supercell." n "/base.apk", "/data/app/org.supercell." n "/lib/arm64", "/data/user/0/com.supercell." n, "/data/user/0/com.supercell." n "/files", "/data/user/0/com.supercell." n "/cache",n "\n"}
+static const game_t games[]={GAME("brawlstars"),GAME("clashofclans"),GAME("clashroyale"),GAME("moco"),
+                             GAME("squad"),GAME("hayday"),GAME("boombeach")};
+#undef GAME
+static const game_t *guest_game(const emu_t *e){
+    for(const emu_t *m=e;m;m=m==e?e->peer:NULL){
+        for(unsigned i=0;i<sizeof games/sizeof games[0];i++)
+            if(!strcmp(m->package.package,games[i].package))return &games[i];
+        if(m->image_name)for(unsigned i=0;i<sizeof games/sizeof games[0];i++){
+            char shield[128];snprintf(shield,sizeof shield,"libsupercell_%s.so",strrchr(games[i].package,'.')+1);
+            if(!strcmp(m->image_name,shield))return &games[i];
+        }
+    }
+    return &games[0];
+}
+
 static char *build_maps(const emu_t *e, size_t *outn){
     size_t cap = 16384; char *buf = (char *)malloc(cap); size_t n = 0;
     for(const emu_t *m=e;m;m=m==e ? e->peer : NULL){
@@ -327,9 +345,9 @@ static char *build_maps(const emu_t *e, size_t *outn){
         char perms[5];
         perms[0] = 'r'; perms[1] = (s->flags & 2) ? 'w' : '-';
         perms[2] = (s->flags & 1) ? 'x' : '-'; perms[3] = 'p'; perms[4] = 0;
-        n += (size_t)snprintf(buf+n, cap-n, "%016llx-%016llx %s %06llx 00:01 12345 /data/app/org.supercell.brawlstars/lib/arm64/%s\n",
+        n += (size_t)snprintf(buf+n, cap-n, "%016llx-%016llx %s %06llx 00:01 12345 %s/%s\n",
              (unsigned long long)b0, (unsigned long long)e0, perms,
-              (unsigned long long)(s->off & ~0xfffULL), shown);
+               (unsigned long long)(s->off & ~0xfffULL), guest_game(e)->native, shown);
     }
     }
     n += (size_t)snprintf(buf+n, cap-n,
@@ -603,7 +621,10 @@ static int emu_sscanf(emu_t *e, uint64_t s_addr, uint64_t fmt_addr){
         int skip = 0;
         char lmod[8]; size_t lml = 0;
         if(fmt[fi] == '*'){ skip = 1; fi++; }
-        while(fi < fl && fmt[fi] >= '0' && fmt[fi] <= '9') fi++;
+        size_t width=0;
+        while(fi < fl && fmt[fi] >= '0' && fmt[fi] <= '9'){
+            width=width<sizeof(s)?width*10+(size_t)(fmt[fi]-'0'):sizeof(s);fi++;
+        }
         while(fi < fl && lml < 7 && strchr("hljztL", fmt[fi])) lmod[lml++] = fmt[fi++];
         lmod[lml] = 0;
         if(fi >= fl) break;
@@ -619,18 +640,16 @@ static int emu_sscanf(emu_t *e, uint64_t s_addr, uint64_t fmt_addr){
             continue;
         }
         if(strchr("dixXuo", conv)){
-            int neg = 0, base = (conv=='x'||conv=='X') ? 16 : conv=='o' ? 8 : conv=='i' ? 0 : 10;
-            if(si < sl && (s[si]=='+'||s[si]=='-')){ neg = s[si]=='-'; si++; }
-            size_t start = si;
-            if((base == 16||base == 0) && si+1 < sl && s[si]=='0' && (s[si+1]=='x'||s[si+1]=='X')) si += 2;
-            while(si < sl && strchr("0123456789abcdefABCDEF", s[si])) si++;
-            if(si == start) break;
-            char tmp[128]; size_t l = si-start < 120 ? si-start : 120;
-            memcpy(tmp, s+start, l); tmp[l] = 0;
-            unsigned long long val = strtoull(tmp, NULL, base);
-            if(neg) val = (unsigned long long)(-(long long)val);
+            int base = (conv=='x'||conv=='X') ? 16 : conv=='o' ? 8 : conv=='i' ? 0 : 10;
+            char tmp[sizeof s],*end;size_t length=sl-si;
+            if(width&&length>width)length=width;
+            memcpy(tmp,s+si,length);tmp[length]=0;
+            unsigned long long val=strtoull(tmp,&end,base);
+            if(end==tmp)break;
+            si+=(size_t)(end-tmp);
             if(!skip && nargs < 16){
-                if(lmod[0] || conv=='p'){ uc_mem_write(uc, a[nargs], &val, 8); }
+                if(lmod[0]=='h') { if(lmod[1]=='h'){uint8_t v=(uint8_t)val;uc_mem_write(uc,a[nargs],&v,1);}else{uint16_t v=(uint16_t)val;uc_mem_write(uc,a[nargs],&v,2);} }
+                else if(lmod[0]){ uc_mem_write(uc, a[nargs], &val, 8); }
                 else { int32_t v = (int32_t)val; uc_mem_write(uc, a[nargs], &v, 4); }
                 matches++; nargs++;
             }
@@ -1002,7 +1021,7 @@ static int run_threads_once(emu_t *e){
 /* resolve a virtual path to emulated file content (same policy as fopen) */
 static const char *path_content(emu_t *e, const char *path, size_t *outlen){
     char *maps = NULL;
-    if(e->apk && !strcmp(path,"/data/app/com.supercell.brawlstars/base.apk")){
+    if(e->apk && !strcmp(path,guest_game(e)->apk)){
         *outlen=e->apk_len;return (const char *)e->apk;
     }
     for(emu_t *m=e;m;m=m==e?e->peer:NULL){
@@ -1016,19 +1035,21 @@ static const char *path_content(emu_t *e, const char *path, size_t *outlen){
     }
     if(!strcmp(path, "/proc/self/status") || !strcmp(path, "/proc/1234/status")){
         const char *marker=strstr(STATUS_CONTENT,"TracerPid:\t0");
-        int n=snprintf(e->status_content,sizeof e->status_content,"%.*sTracerPid:\t%u%s",
-                       (int)(marker-STATUS_CONTENT),STATUS_CONTENT,e->tracer_pid,marker+12);
+        const char *state=strchr(STATUS_CONTENT,'\n');
+        int n=snprintf(e->status_content,sizeof e->status_content,"Name:\torg.supercell.%.*s%.*sTracerPid:\t%u%s",
+                       (int)strlen(guest_game(e)->comm)-1,guest_game(e)->comm,
+                       (int)(marker-state),state,e->tracer_pid,marker+12);
         *outlen=(size_t)n;
         return e->status_content;
     }
     if(!strcmp(path,"/proc/self/task/1234/comm") || !strcmp(path,"/proc/1234/task/1234/comm")){
-        *outlen=11;return "brawlstars\n";
+        *outlen=strlen(guest_game(e)->comm);return guest_game(e)->comm;
     }
     if(!strcmp(path,"/proc/self/task") || !strcmp(path,"/proc/1234/task")){
         *outlen=0;return "";
     }
     if(!strcmp(path,"/proc/self/cmdline")){
-        *outlen=sizeof "com.supercell.brawlstars";return "com.supercell.brawlstars";
+        *outlen=strlen(guest_game(e)->package)+1;return guest_game(e)->package;
     }
     if(!strcmp(path,"/proc/sys/kernel/yama/ptrace_scope")){*outlen=2;return "0\n";}
     const char *basename=strrchr(path,'/');basename=basename?basename+1:path;
@@ -1109,7 +1130,7 @@ static int guest_vsnprintf(emu_t *e,uint64_t dst,uint64_t capacity,uint64_t form
 static int guest_stat_path(emu_t *e,uint64_t path_addr,uint64_t result){
     char path[512]="";read_cstr(e,path_addr,path,sizeof path);
     size_t len=0;uint32_t mode=0100644;
-    if(!strcmp(path,"/data/app/com.supercell.brawlstars/base.apk") && e->apk)len=e->apk_len;
+    if(!strcmp(path,guest_game(e)->apk) && e->apk)len=e->apk_len;
     else {
         const char *last=strrchr(path,'/');last=last?last+1:path;
         int found=0;
@@ -1228,7 +1249,7 @@ static void dispatch_import(emu_t *e, const char *name){
         }
         if(!phdr){fprintf(stderr,"error: unmapped program headers\n");e->stop=1;uc_emu_stop(uc);return;}
         const char *base=image->image_name?image->image_name:"libsupercell_brawlstars.so";
-        char path[512];snprintf(path,sizeof path,"/data/app/org.supercell.brawlstars/lib/arm64/%s",base);
+        char path[512];snprintf(path,sizeof path,"%s/%s",guest_game(e)->native,base);
         uint64_t path_addr=heap_alloc(e,strlen(path)+1,0);write_cstr(e,path_addr,path);
         uint64_t fields[8]={image->load_bias,path_addr,phdr,phnum,2,0,0,0};
         if(uc_mem_write(uc,info,fields,sizeof fields)){e->stop=1;uc_emu_stop(uc);return;}
@@ -1360,11 +1381,11 @@ static void dispatch_import(emu_t *e, const char *name){
             if(!strcmp(method,"getPackageManager")) value="android/app/ApplicationPackageManager";
             if(!strcmp(method,"getApplicationInfo")) value="android/content/pm/ApplicationInfo";
             if(!strcmp(method,"getPackageInfo")) value="android/content/pm/PackageInfo";
-            if(!strcmp(method,"getPackageName")) value="com.supercell.brawlstars";
+            if(!strcmp(method,"getPackageName")) value=guest_game(e)->package;
             if(!strcmp(method,"getClassLoader")) value="java/lang/ClassLoader";
             if(!strcmp(method,"getAssets")) value="android/content/res/AssetManager";
-            if(!strcmp(method,"getFilesDir")) value="/data/user/0/com.supercell.brawlstars/files";
-            if(!strcmp(method,"getCacheDir")) value="/data/user/0/com.supercell.brawlstars/cache";
+            if(!strcmp(method,"getFilesDir")) value=guest_game(e)->files;
+            if(!strcmp(method,"getCacheDir")) value=guest_game(e)->cache;
             if(!strcmp(method,"getSystemService")){
                 uint64_t argument=index==34?a3:jni_first_arg(e,a3,index==35);
                 char service[128]="";read_cstr(e,argument,service,sizeof service);
@@ -1373,7 +1394,7 @@ static void dispatch_import(emu_t *e, const char *name){
             }
             if(!strcmp(method,"getEnabledAccessibilityServiceList")) value="java/util/Collections$EmptyList";
             if(!strcmp(method,"getApplicationContext")) RET(a1);
-            if(!strcmp(method,"getAbsolutePath") || !strcmp(method,"getPath") || !strcmp(method,"toString")) RET(a1);
+            if(!strcmp(method,"getAbsolutePath") || !strcmp(method,"getPath") || !strcmp(method,"toString") || !strcmp(method,"intern")) RET(a1);
             if(!strcmp(method,"getName")){
                 char path[512]="";read_cstr(e,a1,path,sizeof path);
                 char *last=strrchr(path,'/');last=last?last+1:path;
@@ -1381,7 +1402,7 @@ static void dispatch_import(emu_t *e, const char *name){
             }
             if(!strcmp(method,"listFiles")){
                 char path[512]="";read_cstr(e,a1,path,sizeof path);
-                if(strcmp(path,"/data/app/org.supercell.brawlstars/lib/arm64")) RET0();
+                if(strcmp(path,guest_game(e)->native)) RET0();
                 uint64_t array=heap_alloc(e,24,1),count=0;
                 for(emu_t *m=e;m;m=m==e?e->peer:NULL){
                     char full[1024];
@@ -1423,10 +1444,10 @@ static void dispatch_import(emu_t *e, const char *name){
             }
             if(!strcmp(field,"splitSourceDirs")) RET0(); /* base-only APK fixture */
             const char *value=NULL;
-            if(!strcmp(field,"sourceDir") || !strcmp(field,"publicSourceDir")) value="/data/app/com.supercell.brawlstars/base.apk";
-            if(!strcmp(field,"dataDir")) value="/data/user/0/com.supercell.brawlstars";
-            if(!strcmp(field,"nativeLibraryDir")) value="/data/app/org.supercell.brawlstars/lib/arm64";
-            if(!strcmp(field,"packageName")) value="com.supercell.brawlstars";
+            if(!strcmp(field,"sourceDir") || !strcmp(field,"publicSourceDir")) value=guest_game(e)->apk;
+            if(!strcmp(field,"dataDir")) value=guest_game(e)->data;
+            if(!strcmp(field,"nativeLibraryDir")) value=guest_game(e)->native;
+            if(!strcmp(field,"packageName")) value=guest_game(e)->package;
             if(!strcmp(field,"versionName") && *e->package.version) value=e->package.version;
             if(!strcmp(field,"name") || !strcmp(field,"permission")){
                 char object[256]="";read_cstr(e,a1,object,sizeof object);
@@ -1647,6 +1668,13 @@ static void dispatch_import(emu_t *e, const char *name){
             t->pc = a2;
             ctx_private_tls(e, t, i);
             if(a0){ uint64_t hv = (uint64_t)(i + 1); uc_mem_write(uc, a0, &hv, 8); }
+        }
+        RET0();
+    }
+    if(!strcmp(name,"pthread_cond_wait") || !strcmp(name,"pthread_cond_timedwait")){
+        if(!e->cur_ctx && e->nth){
+            e->yield_workers=1;
+            uc_emu_stop(uc);
         }
         RET0();
     }
@@ -1899,7 +1927,7 @@ static void dispatch_import(emu_t *e, const char *name){
                 uint64_t start=image->load_bias+image->segs[i].va;
                 if(a0<start || a0-start>=image->segs[i].memsz)continue;
                 const char *name=image->image_name?image->image_name:"libsupercell_brawlstars.so";
-                char full[512];snprintf(full,sizeof full,"/data/app/org.supercell.brawlstars/lib/arm64/%s",name);
+                char full[512];snprintf(full,sizeof full,"%s/%s",guest_game(e)->native,name);
                 uint64_t path=heap_alloc(e,strlen(full)+1,0);write_cstr(e,path,full);
                 uint64_t info[4]={path,image->load_bias,0,0};
                 if(uc_mem_write(uc,a1,info,sizeof info)) RET0();
@@ -2442,6 +2470,10 @@ static int run_unpack(emu_t *e){
             continue;
         }
 
+        if(e->yield_workers){
+            e->yield_workers=0;
+            run_threads_once(e);
+        }
         entry = pc;                                /* continue from current pc */
     }
     if(e->stop){
@@ -2605,6 +2637,7 @@ int ctxgen_run(const char *so_path, const char *outdir, int verbose){
         return -1;
     }
     emu_t A; memset(&A, 0, sizeof A);
+    A.image_name=strrchr(so_path,'/');A.image_name=A.image_name?A.image_name+1:so_path;
     FILE *f = fopen(so_path, "rb");
     if(!f){ fprintf(stderr, "error: cannot open %s\n", so_path); return -1; }
     fseek(f, 0, SEEK_END); long szl = ftell(f); fseek(f, 0, SEEK_SET);
@@ -2724,6 +2757,7 @@ int ctxgen_run(const char *so_path, const char *outdir, int verbose){
 
     /* ---- session B: fresh image + decrypted regions -> run generators ---- */
     emu_t B; memset(&B, 0, sizeof B);
+    B.image_name=A.image_name;
     B.raw = A.raw; B.raw_len = A.raw_len;
     B.nsegs = A.nsegs;
     for(int s = 0; s < A.nsegs; s++) B.segs[s] = A.segs[s];

@@ -33,6 +33,15 @@ python3 tools/build_apk.py --base base.apk --native-split config.arm64_v8a.apk \
 ```
 
 The script discovers the LBTS asset and extracts the shield automatically.
+Supported shield names cover Brawl Stars, Clash of Clans, Clash Royale, mo.co,
+Squad Busters, Hay Day, and Boom Beach; the base APK's package selects the
+matching ARM64 shield.
+Density configuration resources are also required for complete UI rendering.
+Pass matching APKs with `--resource-split` and an APKEditor JAR with
+`--apk-editor`; XAPK inputs automatically include their density splits.
+The merger is restricted to resource tables/files, with byte-for-byte checks
+that DEX, native libraries, assets, and service metadata remain unchanged.
+Launch-only checks do not validate consent dialogs, hero selection or gameplay.
 `--dat` and `--shield` override discovery. Recognized protected native dependencies
 are unpacked and verified too; the original shield is excluded from the output.
 Unrecognized layouts fail rather than producing a partial native patch.

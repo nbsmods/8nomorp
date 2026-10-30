@@ -5,13 +5,15 @@ import tempfile
 import unittest
 from pathlib import Path
 import zipfile
+from unittest.mock import patch
 
 import assemble as apk
+from games import GAMES, SHIELDS, shield_for
 
 
-def manifest(utf8=False):
+def manifest(utf8=False, package='com.supercell.brawlstars'):
     names = ['manifest', 'package', 'versionCode', 'requiredSplitTypes', 'splitTypes',
-             'com.supercell.brawlstars', 'base__abi,base__density', '']
+             package, 'base__abi,base__density', '']
     body = bytearray()
     offsets = []
     for name in names:
@@ -42,6 +44,32 @@ def make_zip(path, items):
 
 
 class AssemblyTests(unittest.TestCase):
+    def test_apk_uses_zip32_not_pythons_conservative_limit(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            args = self.fixture(Path(tmp))
+            with patch.object(zipfile, 'ZIP64_LIMIT', 64):
+                apk.assemble(args)
+                self.assertEqual(zipfile.ZIP64_LIMIT, 64)
+            data = args.output.read_bytes()
+            self.assertNotIn(b'PK\x06\x06', data)
+            with zipfile.ZipFile(args.output) as z:
+                self.assertEqual(z.read(apk.LIBRARY), b'unpacked')
+
+    def test_supported_shields_only(self):
+        for package in GAMES:
+            self.assertIn(shield_for(package), SHIELDS)
+        with self.assertRaises(ValueError):
+            shield_for('com.example.unknown')
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            args = self.fixture(root)
+            with zipfile.ZipFile(args.native_split, 'a') as z:
+                for name in SHIELDS:
+                    z.writestr(name, b'shield')
+            apk.assemble(args)
+            with zipfile.ZipFile(args.output) as z:
+                self.assertFalse(SHIELDS.intersection(z.namelist()))
+
     def test_manifest_utf8_utf16_and_indexes(self):
         for utf8 in (False, True):
             data = manifest(utf8)
@@ -92,6 +120,19 @@ class AssemblyTests(unittest.TestCase):
             with self.assertRaises(FileExistsError):
                 apk.assemble(args)
             self.assertEqual(args.output.read_bytes(), saved)
+
+    def test_original_service_metadata_survives_apktool(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            args = self.fixture(Path(tmp))
+            service = 'META-INF/services/kotlinx.coroutines.internal.MainDispatcherFactory'
+            provider = b'kotlinx.coroutines.android.AndroidDispatcherFactory\n'
+            with zipfile.ZipFile(args.original_base, 'a') as z:
+                z.writestr(service, provider)
+                z.writestr('META-INF/ORIGINAL.RSA', b'old signature')
+            apk.assemble(args)
+            with zipfile.ZipFile(args.output) as z:
+                self.assertEqual(z.read(service), provider)
+                self.assertNotIn('META-INF/ORIGINAL.RSA', z.namelist())
 
     def test_unknown_build_metadata_is_discovered(self):
         with tempfile.TemporaryDirectory() as tmp:

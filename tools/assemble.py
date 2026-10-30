@@ -7,14 +7,32 @@ Missing install-time assets can cause a native null dereference during startup.
 """
 import argparse
 import copy
+from contextlib import contextmanager
 import hashlib
 from pathlib import Path
 import shutil
 import struct
 import zipfile
 
+from games import SHIELDS
+
 
 LIBRARY = 'lib/arm64-v8a/libg.so'
+
+
+@contextmanager
+def apk_zip32():
+    """Use ZIP32's real 4 GiB bound, not Python's conservative 2 GiB bound.
+
+    Android APKs must not use ZIP64. Still reject archives beyond ZIP32.
+    This command-line writer is single-threaded; restore the module setting.
+    """
+    previous = zipfile.ZIP64_LIMIT
+    zipfile.ZIP64_LIMIT = (1 << 32) - 1
+    try:
+        yield
+    finally:
+        zipfile.ZIP64_LIMIT = previous
 
 
 def digest(stream):
@@ -121,7 +139,7 @@ def plan(base, native, assets):
         for name, info in entries(archive).items():
             if not name.startswith(prefix) or signature(name):
                 continue
-            if name == 'lib/arm64-v8a/libsupercell_brawlstars.so':
+            if name in SHIELDS:
                 continue
             if name in selected:
                 previous, _ = selected[name]
@@ -161,6 +179,11 @@ def assemble(args):
                     if digest(a) != digest(b):
                         raise ValueError('patched base changed original resources: ' + name)
         selected = plan(base, native, assets)
+        # Apktool drops META-INF by default. ServiceLoader descriptors are
+        # runtime inputs (not signing metadata), notably Kotlin's dispatcher.
+        for name, info in entries(original).items():
+            if name.startswith('META-INF/') and not signature(name):
+                selected[name] = (original, info)
         replacements = {LIBRARY: Path(args.library)}
         for value in getattr(args, 'extra_library', []):
             name, separator, path = value.partition('=')
@@ -173,7 +196,7 @@ def assemble(args):
         # Refuse existing output, including symlinks. Only delete our own partial output.
         stream = output.open('xb')
         try:
-            with stream, zipfile.ZipFile(stream, 'w', allowZip64=False) as out:
+            with apk_zip32(), stream, zipfile.ZipFile(stream, 'w', allowZip64=False) as out:
                 for name, (archive, info) in selected.items():
                     info = copy.copy(info)
                     if name == 'resources.arsc':
@@ -201,7 +224,7 @@ def main():
     args = parser.parse_args()
     try:
         assemble(args)
-    except (OSError, ValueError, KeyError, IndexError, struct.error, zipfile.BadZipFile) as exc:
+    except (OSError, ValueError, KeyError, IndexError, struct.error, zipfile.BadZipFile, zipfile.LargeZipFile) as exc:
         parser.exit(1, 'error: ' + str(exc) + '\n')
 
 

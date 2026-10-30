@@ -11,6 +11,11 @@ import sys
 import tempfile
 import zipfile
 
+from assemble import manifest_root
+from games import shield_for
+from sparse_strings import recover as recover_sparse_strings
+from resource_splits import merge_resources
+
 
 def protected_loader(data):
     """Recognize the audited ARM64 packed DT_INIT register-save wrapper."""
@@ -71,6 +76,16 @@ def run(args):
                     with archive.open(matches[0]) as source, path.open('xb') as dest:
                         shutil.copyfileobj(source, dest, 1024 * 1024)
                     setattr(args, attribute, path)
+                density_names = {f'config.{value}.apk' for value in
+                                 ('ldpi','mdpi','tvdpi','hdpi','xhdpi','xxhdpi','xxxhdpi')}
+                for name in names:
+                    if Path(name).name in density_names:
+                        path = work / Path(name).name
+                        path.write_bytes(archive.read(name))
+                        args.resource_split.append(path)
+        with zipfile.ZipFile(args.base) as archive:
+            package = manifest_root(archive.read('AndroidManifest.xml'))[1].get('package')
+        shield_name = shield_for(package)
         if not args.dat:
             with zipfile.ZipFile(args.base) as archive:
                 candidates = []
@@ -86,8 +101,8 @@ def run(args):
 
         with zipfile.ZipFile(args.native_split) as split:
             if not args.shield:
-                args.shield = work / 'libsupercell_brawlstars.so'
-                args.shield.write_bytes(split.read('lib/arm64-v8a/libsupercell_brawlstars.so'))
+                args.shield = work / Path(shield_name).name
+                args.shield.write_bytes(split.read(shield_name))
             candidates = [n for n in split.namelist()
                           if n == 'lib/arm64-v8a/libg.so']
             if len(candidates) != 1:
@@ -95,7 +110,7 @@ def run(args):
             with split.open(candidates[0]) as src, game.open('wb') as dst:
                 shutil.copyfileobj(src, dst)
             for name in split.namelist():
-                if not name.startswith('lib/arm64-v8a/') or not name.endswith('.so') or name == candidates[0]:
+                if not name.startswith('lib/arm64-v8a/') or not name.endswith('.so') or name in (candidates[0], shield_name):
                     continue
                 data = split.read(name)
                 if protected_loader(data):
@@ -110,6 +125,7 @@ def run(args):
         binary = args.binary.resolve()
         run_cmd([str(binary), 'all', str(args.dat), str(decoded), str(patched),
                  '--so', str(args.shield)])
+        recover_sparse_strings(binary, args.shield, args.base, decoded, patched, work, run_cmd)
         run_cmd([args.apktool, 'b', str(patched), '-o', str(patched_base)], env=apktool_env)
         run_cmd([str(binary), 'unpack', str(game), str(args.shield),
                  str(args.base), str(native_out)])
@@ -122,7 +138,12 @@ def run(args):
         run_cmd([sys.executable, str(Path(__file__).with_name('assemble.py')),
                  '--original-base', str(args.base), '--base', str(patched_base),
                  '--native-split', str(args.native_split), '--asset-pack', str(args.asset_pack),
-                 '--library', str(native_out / 'libg.unpacked.so'), '--output', str(unsigned), *replacements])
+                  '--library', str(native_out / 'libg.unpacked.so'), '--output', str(unsigned), *replacements])
+        if getattr(args, 'resource_split', None):
+            merged = work / 'resources-complete.apk'
+            merge_resources(unsigned, args.resource_split, merged, args.apk_editor, run_cmd)
+            unsigned.unlink()
+            merged.rename(unsigned)
         run_cmd([args.zipalign, '-f', '4', str(unsigned), str(aligned)])
         unsigned.unlink()
         if args.keystore:
@@ -158,6 +179,10 @@ def main():
     parser.add_argument('--dat', type=Path, help='default: discover the single LBTS asset in the base APK')
     parser.add_argument('--native-split', type=Path)
     parser.add_argument('--asset-pack', type=Path)
+    parser.add_argument('--resource-split', type=Path, action='append', default=[],
+                        help='matching density/language configuration APK; repeatable')
+    parser.add_argument('--apk-editor', type=Path,
+                        help='APKEditor JAR required when merging resource splits')
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--keystore', type=Path)
     parser.add_argument('--ks-pass', help='apksigner keystore password argument, e.g. env:KS_PASS')

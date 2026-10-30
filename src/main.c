@@ -19,17 +19,24 @@
 #ifdef WITH_UNICORN
 int ctxgen_run(const char *so_path, const char *outdir, int verbose);
 int ctxgen_native_unpack(const char *game,const char *shield,const char *apk,const char *outdir,int verbose);
+int ctxgen_strings(const char *shield,const char *apk,const char *owner,uint32_t registration,const char *ids,const char *output);
 #endif
 
 /* ---- auto-locate the game .so next to the .dat ---- */
 static const char *SO_NAMES[] = {
     "supercell_brawlstars.so",
     "libsupercell_brawlstars.so",
+    "libsupercell_clashofclans.so",
+    "libsupercell_clashroyale.so",
+    "libsupercell_moco.so",
+    "libsupercell_squad.so",
+    "libsupercell_hayday.so",
+    "libsupercell_boombeach.so",
     NULL
 };
 
 static int load_so(const char *explicit_path, uint8_t **buf, size_t *n, const char **used){
-    const char *cands[4]; int k=0;
+    const char *cands[sizeof SO_NAMES / sizeof SO_NAMES[0] + 1]; int k=0;
     if(explicit_path) cands[k++]=explicit_path;
     if(!explicit_path) for(int i=0;SO_NAMES[i];i++) cands[k++]=SO_NAMES[i];
     for(int i=0;i<k;i++){
@@ -766,6 +773,16 @@ int main(int argc, char **argv){
     }
     if(!strcmp(argv[1],"decrypt")) return cmd_decrypt(argc,argv);
     if(!strcmp(argv[1],"context")) return cmd_context(argc,argv);
+    if(!strcmp(argv[1],"strings")){
+#ifdef WITH_UNICORN
+        if(argc!=8){fprintf(stderr,"usage: 8nomorp strings SHIELD BASE CLASS REGISTRATION_ID IDS OUTPUT\n");return 2;}
+        char *end;unsigned long id=strtoul(argv[5],&end,0);
+        if(*end||id>UINT32_MAX)return 2;
+        return ctxgen_strings(argv[2],argv[3],argv[4],(uint32_t)id,argv[6],argv[7])?1:0;
+#else
+        return 1;
+#endif
+    }
     if(!strcmp(argv[1],"unpack")){
         if(argc!=6){
             fprintf(stderr,"usage: 8nomorp unpack <libg.so> <shield.so> <base.apk> <new-output>\n");return 2;

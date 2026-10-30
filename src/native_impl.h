@@ -116,6 +116,35 @@ static int64_t native_branch_delta(uint32_t word){
     int64_t value=word&0x3ffffffu;if(value&(1<<25))value-=1LL<<26;return value*4;
 }
 typedef struct {uint64_t resolver,stop;unsigned calls;} native_layout_t;
+/* Dart AOT snapshots contain protected instruction blobs, not libg's BL
+ * resolver. Recognize all four exported, file-backed snapshot ranges and
+ * the two data headers; an arbitrary resolver-free ELF is not sufficient. */
+static int native_dart_snapshot(const emu_t *game,const uint8_t *image){
+    static const char *names[]={"_kDartVmSnapshotInstructions","_kDartIsolateSnapshotInstructions",
+                                "_kDartVmSnapshotData","_kDartIsolateSnapshotData"};
+    long table=va2file(game,game->symtab);if(!game->symtab||table<0)return 0;
+    for(unsigned k=0;k<4;k++){
+        unsigned found=0;
+        for(int i=0;i<game->nsyms;i++)if(!strcmp(symname(game,i),names[k])){
+            size_t p=(size_t)table+(size_t)i*24;
+            if(p>game->raw_len||game->raw_len-p<24)return 0;
+            uint64_t address=rd64(game->raw,p+8),length=rd64(game->raw,p+16);
+            if(!length||address>UINT64_MAX-length)return 0;
+            int backed=0;
+            for(int j=0;j<game->nsegs;j++){
+                const seg_t *s=&game->segs[j];
+                if(address>=s->va&&address-s->va<s->filesz&&length<=s->filesz-(address-s->va)&&
+                   !!(s->flags&1)==(k<2))backed=1;
+            }
+            long file=va2file(game,address);
+            if(!backed||file<0||(size_t)file>game->raw_len||length>game->raw_len-(size_t)file)return 0;
+            if(k>=2&&(length<24||rd32(image,(size_t)file)!=0xdcdcf5f5))return 0;
+            found++;
+        }
+        if(found!=1)return 0;
+    }
+    return 1;
+}
 /* Discover the supported calling convention, not a build identity. A unique
  * save-frame entry and indirect tail branch are only candidates: every caller
  * is subsequently executed twice and checked by native_direct_calls(). */
@@ -131,6 +160,9 @@ static int native_discover(const emu_t *game,const uint8_t *image,native_layout_
                rd32(image,file+4)==0x910003fd&&rd32(image,file+8)==0xa90107e0&&
                rd32(image,file+12)==0xa9020fe2){found.resolver=s->va+j;entries++;}
         }
+    }
+    if(!entries&&!tails&&native_dart_snapshot(game,image)){
+        memset(layout,0,sizeof *layout);return 0;
     }
     if(entries!=1||tails!=1){
         fprintf(stderr,"error: ambiguous or unsupported resolver structure (%u entries, %u tails)\n",entries,tails);return -1;
@@ -215,10 +247,14 @@ static int native_restore_relocations(const emu_t *game,uint8_t *out){
             size_t p=(size_t)file+(size_t)i;uint64_t address=rd64(game->raw,p);
             uint32_t type=(uint32_t)rd64(game->raw,p+8);
             if(!type)continue;
-            if(type!=1027&&type!=257&&type!=1025&&type!=1026)return -1;
+            if(type!=1027&&type!=257&&type!=1025&&type!=1026&&type!=1031){
+                fprintf(stderr,"error: unsupported export relocation type %u\n",type);return -1;
+            }
             long target=va2file(game,address);if(target<0)continue; /* BSS is not serialized */
-            if((size_t)target>game->raw_len||game->raw_len-(size_t)target<8)return -1;
-            memcpy(out+(size_t)target,game->raw+(size_t)target,8);
+            /* R_AARCH64_TLSDESC is a resolver/argument pair, not one pointer. */
+            size_t width=type==1031?16:8;
+            if((size_t)target>game->raw_len||game->raw_len-(size_t)target<width)return -1;
+            memcpy(out+(size_t)target,game->raw+(size_t)target,width);
         }
     }
     return 0;
@@ -242,6 +278,8 @@ int ctxgen_native_unpack(const char *game_path,const char *shield_path,const cha
     if(native_blob(game_path,&game->raw,&game->raw_len)||native_blob(shield_path,&host->raw,&host->raw_len)||
         native_blob(apk_path,&host->apk,&host->apk_len)){fprintf(stderr,"error: cannot read native inputs\n");goto done;}
     if(apk_read_metadata(host->apk,host->apk_len,&host->package)||elf_load(host)||elf_load(game))goto done;
+    const char *shield_name=strrchr(shield_path,'/');
+    host->image_name=shield_name?shield_name+1:shield_path;
     elf_syms(host);elf_syms(game);
     if(!host->nsyms||!game->nsyms)goto done;
     for(int i=0;i<host->nsegs;i++)if(host->segs[i].va>=0x1000000||host->segs[i].memsz>0x1000000-host->segs[i].va)goto done;
@@ -259,7 +297,8 @@ int ctxgen_native_unpack(const char *game_path,const char *shield_path,const cha
     uc_hook observer;
     if(uc_hook_add(host->uc,&observer,UC_HOOK_BLOCK,native_probe_observer,&probes,1,0))goto done;
     if(run_unpack(host)||host->stop||rdreg(host->uc,R_PC)!=SENT_JNI||rdreg(host->uc,R_X0)!=0x10002){
-        fprintf(stderr,"error: shield initialization did not complete\n");goto done;
+        fprintf(stderr,"error: shield initialization did not complete (stop=%d, pc=0x%llx, JNI version=0x%llx)\n",
+                host->stop,(unsigned long long)rdreg(host->uc,R_PC),(unsigned long long)rdreg(host->uc,R_X0));goto done;
     }
     if(native_constructor(host,game->load_bias+dyn_value(game,12)))goto done;
     fprintf(stderr,"[*] libg native loader returned; recovering protected call targets\n");
@@ -276,8 +315,9 @@ int ctxgen_native_unpack(const char *game_path,const char *shield_path,const cha
     if(native_discover(game,out,&layout))goto done;
     fprintf(stderr,"[*] discovered resolver=0x%llx tail=0x%llx callers=%u\n",
             (unsigned long long)layout.resolver,(unsigned long long)layout.stop,layout.calls);
-    if(native_direct_calls(host,game,out,&calls,layout.resolver,layout.stop,layout.calls)||
-       native_restore_relocations(game,out))goto done;
+    if(!layout.calls&&!changed){fprintf(stderr,"error: Dart constructor decrypted no executable bytes\n");goto done;}
+    if(layout.calls&&native_direct_calls(host,game,out,&calls,layout.resolver,layout.stop,layout.calls))goto done;
+    if(native_restore_relocations(game,out))goto done;
     long init=va2file(game,dyn_value(game,12));if(init<0||(size_t)init>game->raw_len-4)goto done;
     uint32_t ret=0xd65f03c0;memcpy(out+(size_t)init,&ret,4);memset(out+24,0,8);
     char library[4096],report_path[4096],reference_path[4096],report[2048];
@@ -289,14 +329,15 @@ int ctxgen_native_unpack(const char *game_path,const char *shield_path,const cha
          "APK version (metadata only): %s\n"
         "shield JNI_OnLoad: returned 0x10002\nlibg DT_INIT: returned\n"
         "changed executable bytes before call patches: %zu\nverified direct calls: %u\n"
-        "resolver trials: two distinct register sets per site; arguments/callee-saved/frame verified\n"
+         "resolver trials: two distinct register sets per site; arguments/callee-saved/frame verified\n"
+         "export mode: %s\n"
         "export: original writable bytes and relocations; decrypted executable segments\n"
         "packed DT_INIT: replaced with RET; ELF entry point cleared\n"
          "instruction-matched offline environment-probe bypasses: %u\n"
          "libg.decrypted-reference.bin: analysis-only unpatched reference, NOT an installable library\n"
         "requires patched Java, matching native dependencies and full install-time assets\n"
          "runtime/device/server validation: not performed by this export command\n",host->package.version,changed,calls,
-         probes.count);
+          layout.calls?"verified direct-call resolver":"Dart AOT snapshot (no resolver sites)",probes.count);
     if(length<0||length>=(int)sizeof report||mkdir(outdir,0755))goto done;
     if(native_write_new(library,out,game->raw_len)||native_write_new(report_path,report,(size_t)length)||
        native_write_new(reference_path,reference,game->raw_len)){
@@ -305,5 +346,63 @@ int ctxgen_native_unpack(const char *game_path,const char *shield_path,const cha
     fprintf(stderr,"[+] wrote %s (%u verified direct-call patches); full APK assets/dependencies required; export is not runtime validation\n",library,calls);result=0;
 done:
     game->uc=NULL;emu_free(host);native_free_image(game);native_free_image(host);free(reference);free(out);free(game);free(host);return result;
+}
+/* Resolve the shield's real sparse string IDs. The caller must additionally
+ * authenticate these values against LBTS plaintext before emitting Java. */
+static int native_jni_call(emu_t *e,uint64_t function,uint64_t a2,uint64_t a3){
+    e->stop=0;setup_regs(e->uc,function,SENT_CTOR,JNI_ENV,STACK_TOP-0x1000,0);
+    wrreg(e->uc,R_X2,a2);wrreg(e->uc,UC_ARM64_REG_X3,a3);
+    for(unsigned i=0;i<50;i++){
+        uc_err rc=uc_emu_start(e->uc,rdreg(e->uc,R_PC),0,0,2000000);
+        if(!e->stop&&rdreg(e->uc,R_PC)==SENT_CTOR&&(rc==UC_ERR_OK||rc==UC_ERR_FETCH_UNMAPPED))return 0;
+        if(e->stop||rc)return -1;
+    }
+    return -1;
+}
+int ctxgen_strings(const char *shield,const char *apk,const char *owner,uint32_t registration,const char *ids,const char *output){
+    emu_t *e=calloc(1,sizeof *e);FILE *in=NULL,*out=NULL;int result=-1;char *value=NULL;
+    if(!e)return -1;
+    struct stat st;if(!lstat(output,&st)||errno!=ENOENT)goto done;
+    if(native_blob(shield,&e->raw,&e->raw_len)||native_blob(apk,&e->apk,&e->apk_len)||
+       apk_read_metadata(e->apk,e->apk_len,&e->package)||elf_load(e))goto done;
+    const char *base=strrchr(shield,'/');e->image_name=base?base+1:shield;
+    elf_syms(e);
+    if(uc_open(UC_ARCH_ARM64,UC_MODE_LITTLE_ENDIAN,&e->uc)||emu_map(e)||apply_relocations(e))goto done;
+    uint64_t tls=TLS_BASE,canary=0x1122334455667788ULL;
+    uc_reg_write(e->uc,UC_ARM64_REG_TPIDR_EL0,&tls);uc_mem_write(e->uc,TLS_BASE+0x28,&canary,8);
+    e->heap_next=HEAP_BASE+0x1000;e->mmap_next=MMAP_BASE;e->errno_addr=MISC_BASE+0x1000;
+    e->next_fd=0x200;e->file_next=MISC_BASE+0x4000;e->startup_budget=3000000000ULL;
+    if(run_unpack(e)||e->stop||rdreg(e->uc,R_PC)!=SENT_JNI||rdreg(e->uc,R_X0)!=0x10002)goto done;
+    uint64_t registrar=0;unsigned matches=0;
+    for(unsigned i=0;i<e->nnatives;i++)if(!strcmp(e->natives[i].signature,"(Ljava/lang/Class;I)V")){
+        registrar=e->natives[i].function;matches++;
+    }
+    if(matches!=1)goto done;
+    uint64_t clazz=heap_alloc(e,strlen(owner)+1,0);write_cstr(e,clazz,owner);
+    if(native_jni_call(e,registrar,clazz,registration))goto done;
+    uint64_t function=0;matches=0;
+    for(unsigned i=0;i<e->nnatives;i++)if(!strcmp(e->natives[i].owner,owner)&&
+        !strcmp(e->natives[i].signature,"(I)Ljava/lang/String;")){function=e->natives[i].function;matches++;}
+    if(matches!=1)goto done;
+    in=fopen(ids,"r");if(!in)goto done;
+    int fd=open(output,O_WRONLY|O_CREAT|O_EXCL,0644);if(fd<0)goto done;
+    out=fdopen(fd,"w");if(!out){close(fd);unlink(output);goto done;}
+    value=malloc(65536);if(!value)goto done;
+    unsigned id,count=0;
+    while(fscanf(in,"%x",&id)==1){
+        if(++count>65536||native_jni_call(e,function,id,0)||!rdreg(e->uc,R_X0))goto done;
+        size_t length=read_cstr(e,rdreg(e->uc,R_X0),value,65536);
+        if(length>=65535)goto done;
+        fprintf(out,"%08x\t",id);
+        for(size_t j=0;j<length;j++)fprintf(out,"%02x",(unsigned char)value[j]);
+        fputc('\n',out);
+    }
+    if(!feof(in)||!count||ferror(in)||ferror(out))goto done;
+    fprintf(stderr,"[+] resolved %u sparse string IDs through the original shield\n",count);result=0;
+done:
+    if(in)fclose(in);
+    if(out){if(fclose(out))result=-1;if(result)unlink(output);}
+    if(result)fprintf(stderr,"error: native sparse string recovery failed\n");
+    emu_free(e);native_free_image(e);free(value);free(e);return result;
 }
 #endif

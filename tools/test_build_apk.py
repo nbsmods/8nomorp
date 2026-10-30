@@ -1,15 +1,17 @@
 #!/usr/bin/env python3
-"""Synthetic packaging/CLI fixtures; no proprietary inputs needed."""
+"""Exercise real package/shield discovery, without running external builders."""
 import argparse
 import io
-from pathlib import Path
 import struct
+from pathlib import Path
 import tempfile
 import unittest
 from unittest.mock import patch
 import zipfile
 
 import build_apk
+from games import GAMES, shield_for
+from test_assemble import manifest, make_zip
 
 
 def archive_bytes(entries):
@@ -18,6 +20,10 @@ def archive_bytes(entries):
         for name, data in entries.items():
             archive.writestr(name, data)
     return stream.getvalue()
+
+
+class ReachedPatcher(Exception):
+    pass
 
 
 class BuildTests(unittest.TestCase):
@@ -39,11 +45,12 @@ class BuildTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             xapk = root / 'input.xapk'
-            base = archive_bytes({'assets/random-name.bin': b'lbtsfixture'})
+            base = archive_bytes({'AndroidManifest.xml': manifest(),
+                                  'assets/random-name.bin': b'lbtsfixture'})
             native = archive_bytes({'lib/arm64-v8a/libg.so': b'game',
                                     'lib/arm64-v8a/libsupercell_brawlstars.so': b'shield'})
-            xapk.write_bytes(archive_bytes({'manifest.json': b'{"package_name":"com.example.app"}',
-                                           'com.example.app.apk': base,
+            xapk.write_bytes(archive_bytes({'manifest.json': b'{"package_name":"com.supercell.brawlstars"}',
+                                           'com.supercell.brawlstars.apk': base,
                                            'config.arm64_v8a.apk': native,
                                            'install_time_asset_pack.apk': archive_bytes({})}))
             args = argparse.Namespace(output=root / 'out.apk', xapk=xapk, base=None,
@@ -66,6 +73,39 @@ class BuildTests(unittest.TestCase):
             build_apk.run_cmd(['apksigner', '--ks-pass', 'pass:private-value'])
         self.assertNotIn('private-value', str(printer.call_args))
 
+    def test_three_games_and_both_input_modes(self):
+        for package in GAMES:
+            for use_xapk in (False, True):
+                with self.subTest(package=package, xapk=use_xapk), tempfile.TemporaryDirectory() as tmp:
+                    root = Path(tmp)
+                    base, native, asset = (root / n for n in ('base.apk','native.apk','asset.apk'))
+                    make_zip(base, {'AndroidManifest.xml':manifest(package=package),
+                                    'assets/opaque.bin':b'lbts-config'})
+                    make_zip(native, {shield_for(package):b'shield',
+                                      'lib/arm64-v8a/libg.so':b'packed-game'})
+                    make_zip(asset, {'assets/fingerprint.json':b'{}'})
+                    xapk = root / 'input.xapk'
+                    if use_xapk:
+                        import json
+                        with zipfile.ZipFile(xapk,'w') as z:
+                            z.writestr('manifest.json',json.dumps({'package_name':package}))
+                            for path,name in ((base,package+'.apk'),(native,'config.arm64_v8a.apk'),(asset,'install_time_asset_pack.apk')):
+                                z.write(path,name)
+                    args = argparse.Namespace(output=root/'out.apk',xapk=xapk if use_xapk else None,
+                        base=base,native_split=native,asset_pack=asset,shield=None,dat=None,
+                        binary=root/'8nomorp',apktool='apktool')
 
-if __name__ == '__main__':
+                    def run(command, **kwargs):
+                        if command[1]=='all':
+                            self.assertEqual(Path(command[2]).read_bytes(),b'lbts-config')
+                            self.assertEqual(Path(command[-1]).name,Path(shield_for(package)).name)
+                            self.assertEqual(Path(command[-1]).read_bytes(),b'shield')
+                            raise ReachedPatcher()
+                    with patch.object(build_apk,'run_cmd',side_effect=run):
+                        with self.assertRaises(ReachedPatcher):
+                            build_apk.run(args)
+                    self.assertFalse(args.output.exists())
+
+
+if __name__=='__main__':
     unittest.main()

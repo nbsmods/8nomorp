@@ -108,7 +108,8 @@ static size_t group_hits(const struct source *s, const struct promon_group *g){
         }
         for(size_t k = 0; k < s->nlines; k++){
             char *name = NULL, *type = NULL;
-            int match = field_decl(s->lines[k], &name, &type) &&
+            int match = starts(s->lines[k], ".field ") && token(s->lines[k], "static") &&
+                        field_decl(s->lines[k], &name, &type) &&
                         !strcmp(name, f->name) && !strcmp(type, field_type(f->type));
             free(name); free(type);
             if(match){ hits++; break; }
@@ -117,6 +118,32 @@ static size_t group_hits(const struct source *s, const struct promon_group *g){
     return hits;
 }
 struct match { size_t source, group, hits, total; };
+/* Constant class-registration IDs disambiguate otherwise identical field
+ * names. Use a hint only when it names this class and its complete static
+ * field group matches; legacy/dynamic registrations retain name matching. */
+static long registration_group(const struct source *s,const struct sources *all){
+    long values[256]={0},result=-1;unsigned char known[256]={0},self[256]={0};
+    for(size_t i=0;i<s->nlines;i++){
+        const char *line=trim(s->lines[i]);int reg,a,b;char literal[80];
+        if(starts(line,".method ")){memset(known,0,sizeof known);memset(self,0,sizeof self);}
+        if((!strncmp(line,"const/",6)||!strncmp(line,"const ",6))&&
+           sscanf(strchr(line,' ')+1,"v%d, %79s",&reg,literal)==2&&reg>=0&&reg<256){
+            char *end;values[reg]=strtol(literal,&end,0);known[reg]=!*end;
+        }
+        if(sscanf(line,"const-class v%d,",&reg)==1&&reg>=0&&reg<256&&strchr(line,',')){
+            char *name=descriptor(strchr(line,','));self[reg]=name&&s->name&&!strcmp(name,s->name);free(name);
+        }
+        if(sscanf(line,"invoke-static {v%d, v%d}",&a,&b)==2&&a>=0&&a<256&&b>=0&&b<256&&
+           self[a]&&known[b]&&strstr(line,"(Ljava/lang/Class;I)V")){
+            char *target=descriptor(line);int registrar=0;
+            for(size_t k=0;target&&k<all->count;k++)if(all->items[k].registrar_class&&all->items[k].name&&
+                !strcmp(target,all->items[k].name))registrar=1;
+            free(target);
+            if(registrar){if(result>=0&&result!=values[b])return -1;result=values[b];}
+        }
+    }
+    return result;
+}
 static int rank_match(const void *a, const void *b){
     const struct match *x = a, *y = b;
     int xe = x->hits == x->total, ye = y->hits == y->total;
@@ -130,6 +157,13 @@ static int map_groups(struct sources *all, const struct promon_config *c, struct
     struct match *matches = NULL; size_t count = 0;
     unsigned char *used = calloc(c->ngroups ? c->ngroups : 1, 1);
     if(!used) return -1;
+    for(size_t i=0;i<all->count;i++){
+        struct source *s=&all->items[i];if(!s->field_class)continue;
+        long hint=registration_group(s,all);
+        if(hint<0||(size_t)hint>=c->ngroups||group_hits(s,&c->groups[hint])!=c->groups[hint].count)continue;
+        if(used[hint]){fprintf(stderr,"error: duplicate field registration ID %ld\n",hint);free(used);return -1;}
+        s->group=hint;used[hint]=1;stats->groups++;
+    }
     for(size_t i = 0; i < all->count; i++){
         struct source *s = &all->items[i];
         if(!s->smali || !s->name || !s->field_class) continue;
@@ -147,6 +181,16 @@ static int map_groups(struct sources *all, const struct promon_config *c, struct
         if(all->items[m->source].group >= 0 || used[m->group]) continue;
         all->items[m->source].group = (long)m->group;
         used[m->group] = 1; stats->groups++;
+    }
+    for(size_t j=0;j<c->ngroups;j++)if(!used[j]){
+        fprintf(stderr,"error: unmatched field group %zu (%zu fields):",j,c->groups[j].count);
+        for(size_t k=0;k<c->groups[j].count&&k<12;k++)fprintf(stderr," %s",c->groups[j].fields[k].name);
+        fputc('\n',stderr);
+        for(size_t i=0;i<all->count;i++)if(all->items[i].name){
+            size_t hits=group_hits(&all->items[i],&c->groups[j]);
+            if(hits&&all->items[i].field_class)fprintf(stderr,"  candidate %s: %zu/%zu fields, registered=%d, assigned=%ld\n",
+                all->items[i].name,hits,c->groups[j].count,all->items[i].field_class,all->items[i].group);
+        }
     }
     free(matches); free(used); return 0;
 }
@@ -195,6 +239,15 @@ static int registration(const char *line){
 /* Older loaders construct their library name with a constant char[] rather
  * than const-string. Evaluate only the narrow constant operations, and only
  * recognize the exact shield name; never suppress an arbitrary library load. */
+static const char *shield_names[]={"supercell_brawlstars","supercell_clashofclans","supercell_clashroyale",
+                                  "supercell_moco","supercell_squad","supercell_hayday","supercell_boombeach",NULL};
+static int literal_shield(const char *line){
+    for(int i=0;shield_names[i];i++){
+        char quoted_name[80];snprintf(quoted_name,sizeof quoted_name,"\"%s\"",shield_names[i]);
+        if(strstr(line,quoted_name))return 1;
+    }
+    return 0;
+}
 static int char_array_shield(const struct source *s,size_t begin,size_t end){
     long values[256]={0};unsigned char known[256]={0},filled[256]={0};
     uint16_t chars[256]={0};int array=-1,length=0,constructed=0;
@@ -221,10 +274,13 @@ static int char_array_shield(const struct source *s,size_t begin,size_t end){
             values[a]=chars[values[c]];known[a]=1;
         }else if(strstr(p,"Ljava/lang/String;-><init>([C)V"))constructed=1;
     }
-    const char *expected="supercell_brawlstars";
-    if(!constructed||length!=(int)strlen(expected))return 0;
-    for(int i=0;i<length;i++)if(!filled[i]||chars[i]!=(unsigned char)expected[i])return 0;
-    return 1;
+    if(!constructed)return 0;
+    for(int k=0;shield_names[k];k++){
+        const char *expected=shield_names[k];int matches=length==(int)strlen(expected);
+        for(int i=0;matches&&i<length;i++)if(!filled[i]||chars[i]!=(unsigned char)expected[i])matches=0;
+        if(matches)return 1;
+    }
+    return 0;
 }
 static int write_source(FILE *out, struct source *s, const struct promon_config *c,
                         const char *resolver, const struct sources *all, struct stats *stats){
@@ -232,7 +288,7 @@ static int write_source(FILE *out, struct source *s, const struct promon_config 
     size_t pkglen = (size_t)(strrchr(resolver, '/') ? strrchr(resolver, '/') - resolver + 1 : 1);
     int own_package = s->name && !strncmp(s->name, resolver, pkglen);
     for(size_t i = 0; i < s->nlines; i++){
-        if(strstr(s->lines[i], "Landroid/view/ViewTreeObserver$OnPreDrawListener;") || strstr(s->lines[i], "\"supercell_brawlstars\"")) return_true = 1;
+        if(strstr(s->lines[i], "Landroid/view/ViewTreeObserver$OnPreDrawListener;") || literal_shield(s->lines[i])) return_true = 1;
     }
     char *load_reg = NULL;int encoded_shield=0;
     for(size_t i = 0; i < s->nlines; i++){
@@ -284,7 +340,7 @@ static int write_source(FILE *out, struct source *s, const struct promon_config 
             free(target);
             if(remove){ stats->registrations++; continue; }
         }
-        if(starts(line, "const-string") && strstr(line, "\"supercell_brawlstars\"")){
+        if(starts(line, "const-string") && literal_shield(line)){
             const char *p = strchr(trim(line), ' ');
             if(p){ p = trim(p); const char *comma = strchr(p, ',');
                 if(comma){ free(load_reg); load_reg = strndup(p, (size_t)(comma - p)); }

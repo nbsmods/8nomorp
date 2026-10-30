@@ -34,6 +34,26 @@ int main(void){
     write_cstr(e,0x10000,"PPid: 500");assert(emu_sscanf(e,0x10000,0x10200)==0);
     write_cstr(e,0x10000,"TracerPid: 0x1000");assert(emu_sscanf(e,0x10000,0x10200)==1);
     uc_mem_read(e->uc,0x10400,&parsed,4);assert(parsed==4096);
+    /* Decimal must stop at hex letters; %i retains octal/hex auto-base. */
+    const char *inputs[]={"123abc", "077", "-42", "0Xff", "+", "xyz", "19"};
+    const char *formats[]={"%d%c", "%i", "%d", "%i", "%u", "%x", "%1d%c"};
+    const unsigned expected[]={123,63,(unsigned)-42,255,0,0,1};
+    const int counts[]={2,1,1,1,0,0,2};
+    for(unsigned i=0;i<sizeof inputs/sizeof inputs[0];i++){
+        write_cstr(e,0x10000,inputs[i]);write_cstr(e,0x10200,formats[i]);
+        wrreg(e->uc,R_X2,0x10400);wrreg(e->uc,UC_ARM64_REG_X3,0x10408);
+        assert(emu_sscanf(e,0x10000,0x10200)==counts[i]);
+        if(counts[i]){uc_mem_read(e->uc,0x10400,&parsed,4);assert(parsed==expected[i]);}
+    }
+    emu_t peer={0};e->peer=&peer;
+    const char *shields[]={"libsupercell_brawlstars.so","libsupercell_clashofclans.so","libsupercell_clashroyale.so",
+                          "libsupercell_moco.so","libsupercell_squad.so","libsupercell_hayday.so","libsupercell_boombeach.so"};
+    for(unsigned i=0;i<sizeof shields/sizeof shields[0];i++){
+        peer.image_name=shields[i];assert(guest_game(e)==&games[i]);
+        const char *cmd=path_content(e,"/proc/self/cmdline",&length);
+        assert(!strcmp(cmd,games[i].package));assert(length==strlen(cmd)+1);
+    }
+    e->peer=NULL;
     /* Direct variadic snprintf/asprintf must consume X registers correctly. */
     assert(!uc_mem_map(e->uc,MISC_BASE+0x805000,0x2000,UC_PROT_ALL));
     assert(!uc_mem_map(e->uc,HEAP_BASE,0x10000,UC_PROT_ALL));e->heap_next=HEAP_BASE;
@@ -46,5 +66,20 @@ int main(void){
     dispatch_import(e,"asprintf");assert(rdreg(e->uc,R_X0)==17);
     uint64_t allocated=0;uc_mem_read(e->uc,0x13000,&allocated,8);
     uc_mem_read(e->uc,allocated,buffer,sizeof buffer);assert(!strcmp(buffer,"/proc/1234/status"));
+    /* A main-thread condition wait must yield to a worker, not spin forever. */
+    const uint32_t worker[]={0x52800021,0xb9000001,0xd65f03c0}; /* mov w1,1; str w1,[x0]; ret */
+    uc_mem_write(e->uc,0x15000,worker,sizeof worker);
+    uint32_t ready=0;uc_mem_write(e->uc,0x14000,&ready,4);
+    e->nth=1;e->th[0].state=1;e->th[0].pc=0x15000;e->th[0].sp=0x18000;
+    e->th[0].regs[0]=0x14000;e->th[0].regs[30]=SENT_THREAD;
+    wrreg(e->uc,R_X30,0x19000);
+    dispatch_import(e,"pthread_cond_timedwait");
+    assert(e->yield_workers&&rdreg(e->uc,R_PC)==0x19000&&rdreg(e->uc,R_X0)==0);
+    e->yield_workers=0;assert(run_threads_once(e));
+    uc_mem_read(e->uc,0x14000,&ready,4);assert(ready==1);
+    assert(rdreg(e->uc,R_PC)==0x19000&&rdreg(e->uc,R_X0)==0);
+    assert(e->th[0].state==3);
+    e->cur_ctx=1;dispatch_import(e,"pthread_cond_wait");assert(!e->yield_workers);
+    if(e->th[0].cpu)uc_context_free(e->th[0].cpu);
     uc_close(e->uc);free(e);puts("guest runtime regression tests passed");return 0;
 }

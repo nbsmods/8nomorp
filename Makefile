@@ -66,6 +66,9 @@ test-native-verifier:
 
 test-apk-assembly:
 	python3 tools/test_assemble.py
+	python3 tools/test_build_apk.py
+	python3 tools/test_sparse_strings.py
+	python3 tools/test_resource_splits.py
 
 test-release-runner:
 	python3 tools/test_release_runner.py

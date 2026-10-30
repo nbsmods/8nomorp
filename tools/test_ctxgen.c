@@ -83,6 +83,41 @@ static void test_native_discovery(void){
     game.segs[0].filesz=sizeof image; /* out-of-file executable bytes */
     native_layout_t found={0};assert(native_discover(&game,image,&found)<0);
 }
+static void test_native_tls_export(void){
+    emu_t game={0};uint8_t raw[0x400]={0},out[0x400];memset(out,0xff,sizeof out);
+    game.raw=raw;game.raw_len=sizeof raw;game.nsegs=1;
+    game.segs[0].va=0x1000;game.segs[0].filesz=sizeof raw;
+    put64(raw,0x20,0x40);raw[56]=1;
+    put32(raw,0x40,2);put64(raw,0x50,0x1100);put64(raw,0x60,48);
+    put64(raw,0x100,7);put64(raw,0x108,0x1180);
+    put64(raw,0x110,8);put64(raw,0x118,24);
+    put64(raw,0x180,0x1200);put64(raw,0x188,1031);
+    for(unsigned i=0;i<16;i++)raw[0x200+i]=(uint8_t)i;
+    assert(!native_restore_relocations(&game,out));
+    assert(!memcmp(raw+0x200,out+0x200,16));assert(out[0x210]==0xff);
+    put64(raw,0x180,0x13f8);assert(native_restore_relocations(&game,out)<0);
+    put64(raw,0x188,9999);assert(native_restore_relocations(&game,out)<0);
+}
+static void test_dart_snapshot_discovery(void){
+    emu_t game={0};uint8_t image[0x400]={0};
+    char *names[]={"","_kDartVmSnapshotInstructions","_kDartIsolateSnapshotInstructions",
+                   "_kDartVmSnapshotData","_kDartIsolateSnapshotData"};
+    game.raw=image;game.raw_len=sizeof image;game.symnames=names;game.nsyms=5;game.symtab=0x1020;
+    game.nsegs=2;
+    game.segs[0].va=0x1000;game.segs[0].filesz=0x200;game.segs[0].flags=4;
+    game.segs[1].va=0x2000;game.segs[1].off=0x200;game.segs[1].filesz=0x200;game.segs[1].flags=5;
+    for(unsigned i=1;i<5;i++){
+        put64(image,0x20+i*24+8,i<3?0x2000+(i-1)*0x40:0x10a0+(i-3)*0x20);
+        put64(image,0x20+i*24+16,0x20);
+    }
+    put32(image,0xa0,0xdcdcf5f5);put32(image,0xc0,0xdcdcf5f5);
+    assert(native_dart_snapshot(&game,image));
+    native_layout_t layout={0};assert(!native_discover(&game,image,&layout));assert(!layout.calls);
+    put32(image,0xc0,0);assert(!native_dart_snapshot(&game,image));assert(native_discover(&game,image,&layout)<0);
+    put32(image,0xc0,0xdcdcf5f5);
+    put32(image,0x200,0xd61f03a0);assert(native_discover(&game,image,&layout)<0);
+    put32(image,0x200,0);put64(image,0x20+24+16,0x1000);assert(!native_dart_snapshot(&game,image));
+}
 static void test_native_probe_discovery(void){
     emu_t host={0};uint8_t image[0x400]={0};host.raw_len=sizeof image;
     host.nsegs=2;host.segs[0]=(seg_t){0};host.segs[1]=(seg_t){0};
@@ -209,6 +244,8 @@ int main(void){
     test_native_segment_targets();
     test_native_direct_resolver();
     test_native_discovery();
+    test_dart_snapshot_discovery();
+    test_native_tls_export();
     test_native_probe_discovery();
     test_native_probe_observer();
     test_gnu_symbols();
