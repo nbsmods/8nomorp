@@ -37,7 +37,7 @@ $(UC_LIB):
 	$(MAKE) -C $(UC_DIR)/build -j$(JOBS)
 
 %.uc.o: %.c src/lbts.h src/promon.h src/apk.h
-	$(CC) $(CFLAGS) $(UC_CFLAGS) -I$(UC_INC) -c -o $@ $<
+	$(CC) $(CFLAGS) $(UC_CFLAGS) -c -o $@ $<
 
 src/ctxgen.uc.o: src/native_impl.h src/attest_impl.h src/attest_recover.h src/attestation.h
 src/attestation.o src/attestation.uc.o: src/attestation.h

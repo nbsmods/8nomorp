@@ -15,7 +15,7 @@
  *   - generator entries = structural prologue scan of the decrypted code
  *
  * Output: one or more candidate context blobs (ctx_<n>.bin).  The caller
- * (`lbts decrypt --so ...`) picks the one that authenticates the container.
+ * (`8nomorp decrypt --so ...`) picks the one that authenticates the container.
  */
 #define _POSIX_C_SOURCE 200809L
 #include <stdio.h>

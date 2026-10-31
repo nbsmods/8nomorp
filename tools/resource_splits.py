@@ -1,12 +1,11 @@
 """Merge density/language resources without changing patched code or assets."""
-import hashlib
 import copy
 from pathlib import Path
 import shutil
 import tempfile
 import zipfile
 
-from assemble import entries, manifest_root
+from assemble import apk_zip32, digest, entries, manifest_root, signature
 
 
 def validate_split(base, split):
@@ -34,14 +33,9 @@ def verify_payload(original, merged):
         for name in expected:
             if not payload(name):
                 continue
-            def digest(archive):
-                h = hashlib.sha256()
-                with archive.open(name) as stream:
-                    for block in iter(lambda: stream.read(1024 * 1024), b''):
-                        h.update(block)
-                return h.digest()
-            if digest(before) != digest(after):
-                raise ValueError('resource merger changed runtime payload: ' + name)
+            with before.open(name) as a, after.open(name) as b:
+                if digest(a) != digest(b):
+                    raise ValueError('resource merger changed runtime payload: ' + name)
         a = manifest_root(before.read('AndroidManifest.xml'))[1]
         b = manifest_root(after.read('AndroidManifest.xml'))[1]
         if any(a.get(key) != b.get(key) for key in ('package', 'versionCode', 'versionName')):
@@ -70,7 +64,6 @@ def merge_resources(base, splits, output, editor, run):
         # Preserve our manifest, DEX, assets, native libraries and metadata.
         # Only the resource table and its referenced files come from the merger.
         with zipfile.ZipFile(base) as source, zipfile.ZipFile(merged) as resources:
-            from assemble import apk_zip32, signature
             with apk_zip32(), zipfile.ZipFile(output, 'x', allowZip64=False) as dest:
                 for info in source.infolist():
                     if info.filename == 'resources.arsc' or info.filename.startswith('res/') or signature(info.filename):

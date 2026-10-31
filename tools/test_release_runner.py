@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 import hashlib
+import os
 from pathlib import Path
+import sys
 import tempfile
 import unittest
 import zipfile
@@ -55,8 +57,6 @@ class RunnerTests(unittest.TestCase):
                     release.validate_inputs(paths)
 
     def test_failed_subprocess_retains_log(self):
-        import os
-        import sys
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             with self.assertRaisesRegex(ValueError, 'step failed'):

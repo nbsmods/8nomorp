@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Fresh, version-independent Java patch/rebuild test; not runtime certification."""
 import argparse
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -8,7 +9,51 @@ import re
 import subprocess
 import zipfile
 
-from test_v66_release import check_rebuilt, context_captures, digest, run
+
+def digest(stream):
+    h = hashlib.sha256()
+    for block in iter(lambda: stream.read(1024 * 1024), b''):
+        h.update(block)
+    return h.hexdigest()
+
+
+def context_captures(log, root):
+    candidates = re.findall(r'^\[\+\] context candidate: (.*?) \(entry ', log, re.MULTILINE)
+    if not candidates:
+        raise ValueError('no freshly generated contexts')
+    if any(root / 'tmp' not in Path(candidate).parents for candidate in candidates):
+        raise ValueError('context was not generated inside the private test directory')
+    return candidates
+
+
+def run(command, root, name, env):
+    with (root / (name + '.log')).open('w') as log:
+        result = subprocess.run([str(x) for x in command], stdout=log,
+                                stderr=subprocess.STDOUT, env=env, timeout=1800)
+    if result.returncode:
+        raise ValueError(name + ' failed; see ' + str(root / (name + '.log')))
+
+
+def check_rebuilt(base, rebuilt):
+    checked, changed = 0, 0
+    with zipfile.ZipFile(base) as original, zipfile.ZipFile(rebuilt) as patched:
+        dex = {name for name in original.namelist() if re.fullmatch(r'classes(?:\d+)?\.dex', name)}
+        if dex != {name for name in patched.namelist() if re.fullmatch(r'classes(?:\d+)?\.dex', name)}:
+            raise ValueError('DEX entry set changed')
+        for name in original.namelist():
+            if name == 'resources.arsc' or name.startswith(('res/', 'assets/')):
+                with original.open(name) as a, patched.open(name) as b:
+                    if digest(a) != digest(b):
+                        raise ValueError('resource changed: ' + name)
+                checked += 1
+            elif name in dex:
+                a, b = original.read(name), patched.read(name)
+                if not b.startswith(b'dex\n'):
+                    raise ValueError('invalid rebuilt DEX: ' + name)
+                changed += a != b
+    if not changed:
+        raise ValueError('no DEX changes')
+    return checked, changed
 
 
 def coverage(log):

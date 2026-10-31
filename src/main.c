@@ -713,7 +713,7 @@ static int cmd_decrypt(int argc, char **argv){
     return 0;
 }
 
-/* ============================== encrypt ============================== */
+/* =============================== patch =============================== */
 static int cmd_patch(int argc, char **argv){
     if(argc<7){
         fprintf(stderr,"usage: 8nomorp %s <input.dat> <decoded-input> <new-output> --so <lib.so> | --context <context.bin>\n",argv[1]);
@@ -737,9 +737,10 @@ static int cmd_patch(int argc, char **argv){
     return rc ? 3 : 0;
 }
 
+/* ============================== encrypt ============================== */
 static int cmd_encrypt(int argc, char **argv){
-    if(argc<3){ fprintf(stderr,"usage: 8nomorp encrypt <input> [output.dat]\n"); return 2; }
     (void)argv;
+    if(argc<3){ fprintf(stderr,"usage: 8nomorp encrypt <input> [output.dat]\n"); return 2; }
     /* Verification is recovered, but the inverse white-box transform needed
      * to construct ciphertext and encrypted tags is not proven. */
     fprintf(stderr,
@@ -760,10 +761,12 @@ int main(int argc, char **argv){
             "           Patch with an existing authenticated context.\n"
             "  unpack   LIBRARY SHIELD BASE_APK OUTPUT_DIR\n"
             "           Recover and verify supported ARM64 resolver calls.\n"
-            "  attest   LIBRARY SHIELD BASE_APK CLASS REGISTRATION_ID REQUESTS\n"
+            "  attest   LIBRARY SHIELD BASE_APK CLASS REGISTRATION_ID [REQUESTS [TIME SEED]]\n"
             "           Recover build material and generate tokens from 32-byte hex lines.\n"
             "  attest-material LIBRARY SHIELD BASE_APK CLASS REGISTRATION_ID\n"
             "           Export verified library-derived material as JSON.\n"
+            "  strings  SHIELD BASE_APK CLASS REGISTRATION_ID IDS OUTPUT\n"
+            "           Resolve sparse Promon string IDs through the original native code.\n"
             "  context  SHIELD [OUTPUT_DIR]\n"
             "           Recover runtime context candidates.\n"
             "  decrypt  CONFIG [OUTPUT] [--context CONTEXT] [--so SHIELD] [--json JSON]\n"
