@@ -1437,8 +1437,8 @@ static void dispatch_import(emu_t *e, const char *name){
                 if(!n) RET0();
                 uint64_t array=heap_alloc(e,8+n*8,1);uc_mem_write(uc,array,&n,8);
                 for(unsigned i=0;i<n;i++){
-                    const char *name=e->package.services[i].name;
-                    uint64_t item=heap_alloc(e,strlen(name)+1,0);write_cstr(e,item,name);
+                    const char *service=e->package.services[i].name;
+                    uint64_t item=heap_alloc(e,strlen(service)+1,0);write_cstr(e,item,service);
                     uc_mem_write(uc,array+8+(uint64_t)i*8,&item,8);
                 }
                 RET(array);
@@ -1725,8 +1725,8 @@ static void dispatch_import(emu_t *e, const char *name){
         size_t i=0;
         for(;;i++){
             unsigned char l=(unsigned char)left[i],r=(unsigned char)right[i];
-            if(l>='A'&&l<='Z')l+='a'-'A';
-            if(r>='A'&&r<='Z')r+='a'-'A';
+            if(l>='A'&&l<='Z')l=(unsigned char)(l+('a'-'A'));
+            if(r>='A'&&r<='Z')r=(unsigned char)(r+('a'-'A'));
             if(l!=r||!l)RET((uint64_t)(int64_t)((int)l-(int)r));
         }
     }
@@ -1959,8 +1959,8 @@ static void dispatch_import(emu_t *e, const char *name){
             for(int i=0;i<image->nsegs;i++){
                 uint64_t start=image->load_bias+image->segs[i].va;
                 if(a0<start || a0-start>=image->segs[i].memsz)continue;
-                const char *name=image->image_name?image->image_name:"libsupercell_brawlstars.so";
-                char full[512];snprintf(full,sizeof full,"%s/%s",guest_game(e)->native,name);
+                const char *image_name=image->image_name?image->image_name:"libsupercell_brawlstars.so";
+                char full[512];snprintf(full,sizeof full,"%s/%s",guest_game(e)->native,image_name);
                 uint64_t path=heap_alloc(e,strlen(full)+1,0);write_cstr(e,path,full);
                 uint64_t info[4]={path,image->load_bias,0,0};
                 if(uc_mem_write(uc,a1,info,sizeof info)) RET0();

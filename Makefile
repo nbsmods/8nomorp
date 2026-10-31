@@ -51,7 +51,7 @@ $(FULL): $(UC_LIB) $(GEN_OBJ)
 $(OBJ): src/lbts.h src/promon.h
 
 clean:
-	rm -f $(FULL) $(OBJ) $(GEN_OBJ) test-promon test-ctxgen test-apk test-guest-runtime test-attestation probe-native
+	rm -f $(FULL) $(OBJ) $(GEN_OBJ) test-promon test-ctxgen test-apk test-guest-runtime probe-native
 
 test: $(UC_LIB)
 	$(CC) $(CFLAGS) tools/test_apk.c $(ZLIB_LIB) -o test-apk

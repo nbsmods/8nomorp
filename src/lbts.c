@@ -415,7 +415,7 @@ static double region_entropy(const uint8_t *p, long n)
     double e = 0;
     for (int c = 0; c < 256; c++) {
         if (counts[c]) {
-            double pr = (double)counts[c] / total;
+            double pr = (double)counts[c] / (double)total;
             e -= pr * (log(pr) / log(2.0));
         }
     }

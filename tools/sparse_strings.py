@@ -4,7 +4,6 @@ Values must also occur in the authenticated LBTS table emitted by `all`.
 Dense, already-supported index layouts are left unchanged.
 """
 import json
-from pathlib import Path
 import re
 
 METHOD = re.compile(r'^\.method .*\bstatic\b.*\bnative\b\s+(\w+)\(I\)Ljava/lang/String;', re.M)

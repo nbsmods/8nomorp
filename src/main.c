@@ -1,9 +1,8 @@
 /* main.c -- command line front-end for the LBTS tool.
  *
- *   lbts decrypt <input.dat> [output] [--context context.bin] [--json config.json]
- *   lbts encrypt <input>      [output.dat]
- *   lbts info    <input.dat>
- *   lbts scan    <supercell_brawlstars.so>
+ *   8nomorp decrypt <input.dat> [output] [--context context.bin] [--json config.json]
+ *   8nomorp info    <input.dat>
+ *   8nomorp scan    <shield.so>
  */
 #define _POSIX_C_SOURCE 200809L
 #include "lbts.h"
