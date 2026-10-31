@@ -19,6 +19,7 @@
 #ifdef WITH_UNICORN
 int ctxgen_run(const char *so_path, const char *outdir, int verbose);
 int ctxgen_native_unpack(const char *game,const char *shield,const char *apk,const char *outdir,int verbose);
+int ctxgen_attest(const char *game,const char *shield,const char *apk,const char *owner,uint32_t registration,const char *requests,const char *time,const char *seed,int verbose);
 int ctxgen_strings(const char *shield,const char *apk,const char *owner,uint32_t registration,const char *ids,const char *output);
 #endif
 
@@ -760,6 +761,10 @@ int main(int argc, char **argv){
             "           Patch with an existing authenticated context.\n"
             "  unpack   LIBRARY SHIELD BASE_APK OUTPUT_DIR\n"
             "           Recover and verify supported ARM64 resolver calls.\n"
+            "  attest   LIBRARY SHIELD BASE_APK CLASS REGISTRATION_ID REQUESTS\n"
+            "           Recover build material and generate tokens from 32-byte hex lines.\n"
+            "  attest-material LIBRARY SHIELD BASE_APK CLASS REGISTRATION_ID\n"
+            "           Export verified library-derived material as JSON.\n"
             "  context  SHIELD [OUTPUT_DIR]\n"
             "           Recover runtime context candidates.\n"
             "  decrypt  CONFIG [OUTPUT] [--context CONTEXT] [--so SHIELD] [--json JSON]\n"
@@ -791,6 +796,17 @@ int main(int argc, char **argv){
         return ctxgen_native_unpack(argv[2],argv[3],argv[4],argv[5],getenv("CTXGEN_VERBOSE")!=NULL)?1:0;
 #else
         fprintf(stderr,"error: native unpacking requires the Unicorn build\n");return 1;
+#endif
+    }
+    if(!strcmp(argv[1],"attest")||!strcmp(argv[1],"attest-material")){
+        int material=!strcmp(argv[1],"attest-material");
+        if(material?argc!=7:(argc!=8&&argc!=10)){fprintf(stderr,"usage: 8nomorp attest[-material] LIBRARY SHIELD BASE CLASS REGISTRATION_ID [REQUESTS [TIME SEED]]\n");return 2;}
+#ifdef WITH_UNICORN
+        char *end;unsigned long id=strtoul(argv[6],&end,0);
+        if(!*argv[6]||*end||id>UINT32_MAX)return 2;
+        return ctxgen_attest(argv[2],argv[3],argv[4],argv[5],(uint32_t)id,material?NULL:argv[7],argc==10?argv[8]:"auto",argc==10?argv[9]:"deterministic",getenv("CTXGEN_VERBOSE")!=NULL)?1:0;
+#else
+        fprintf(stderr,"error: attestation requires the Unicorn build\n");return 1;
 #endif
     }
     if(!strcmp(argv[1],"patch") || !strcmp(argv[1],"all")) return cmd_patch(argc,argv);

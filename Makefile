@@ -16,7 +16,7 @@ JOBS      ?= 2
 ZLIB_LIB ?= $(shell $(CC) -print-file-name=libz.a)
 UC_LIBS   = $(UC_LIB) $(ZLIB_LIB) -lpthread -lm
 
-SRC  = src/main.c src/lbts.c src/promon.c
+SRC  = src/main.c src/lbts.c src/promon.c src/attestation.c
 OBJ  = $(SRC:.c=.o)
 GEN_SRC = src/ctxgen.c src/apk.c
 GEN_OBJ = $(SRC:.c=.uc.o) $(GEN_SRC:.c=.uc.o)
@@ -36,8 +36,11 @@ $(UC_LIB):
 		-DUNICORN_ARCHS=aarch64
 	$(MAKE) -C $(UC_DIR)/build -j$(JOBS)
 
-%.uc.o: %.c src/lbts.h src/promon.h src/apk.h src/native_impl.h
+%.uc.o: %.c src/lbts.h src/promon.h src/apk.h
 	$(CC) $(CFLAGS) $(UC_CFLAGS) -I$(UC_INC) -c -o $@ $<
+
+src/ctxgen.uc.o: src/native_impl.h src/attest_impl.h src/attest_recover.h src/attestation.h
+src/attestation.o src/attestation.uc.o: src/attestation.h
 
 $(FULL): $(UC_LIB) $(GEN_OBJ)
 	$(CC) $(CFLAGS) $(UC_CFLAGS) -o $@ $(GEN_OBJ) $(UC_LIBS)
@@ -48,16 +51,16 @@ $(FULL): $(UC_LIB) $(GEN_OBJ)
 $(OBJ): src/lbts.h src/promon.h
 
 clean:
-	rm -f $(FULL) $(OBJ) $(GEN_OBJ) test-promon test-ctxgen test-apk test-guest-runtime probe-native
+	rm -f $(FULL) $(OBJ) $(GEN_OBJ) test-promon test-ctxgen test-apk test-guest-runtime test-attestation probe-native
 
 test: $(UC_LIB)
 	$(CC) $(CFLAGS) tools/test_apk.c $(ZLIB_LIB) -o test-apk
 	./test-apk
 	$(CC) $(CFLAGS) -Isrc tools/test_promon.c src/promon.c -o test-promon
 	./test-promon
-	$(CC) $(CFLAGS) $(UC_CFLAGS) -Isrc tools/test_ctxgen.c src/lbts.c src/apk.c $(UC_LIBS) -o test-ctxgen
+	$(CC) $(CFLAGS) $(UC_CFLAGS) -Isrc tools/test_ctxgen.c src/lbts.c src/apk.c src/attestation.c $(UC_LIBS) -o test-ctxgen
 	./test-ctxgen
-	$(CC) $(CFLAGS) $(UC_CFLAGS) -Isrc tools/test_guest_runtime.c src/lbts.c src/apk.c $(UC_LIBS) -o test-guest-runtime
+	$(CC) $(CFLAGS) $(UC_CFLAGS) -Isrc tools/test_guest_runtime.c src/lbts.c src/apk.c src/attestation.c $(UC_LIBS) -o test-guest-runtime
 	./test-guest-runtime
 
 # Independent export-verifier fixtures; optional development-only Python.

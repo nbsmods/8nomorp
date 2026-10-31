@@ -8,7 +8,7 @@ import re
 import subprocess
 import zipfile
 
-from test_v66_release import context_captures, digest, run
+from test_v66_release import check_rebuilt, context_captures, digest, run
 
 
 def coverage(log):
@@ -55,24 +55,7 @@ def test(args):
         result['fresh_context_candidates'] = len(context_captures(log, root))
         run([args.apktool, 'b', root / 'patched', '-o', root / 'patched-unsigned.apk'],
             root, 'build', env)
-        checked, changed = 0, 0
-        with zipfile.ZipFile(base) as original, zipfile.ZipFile(root / 'patched-unsigned.apk') as patched:
-            dex = {n for n in original.namelist() if re.fullmatch(r'classes(?:\d+)?\.dex', n)}
-            if dex != {n for n in patched.namelist() if re.fullmatch(r'classes(?:\d+)?\.dex', n)}:
-                raise ValueError('DEX entry set changed')
-            for name in original.namelist():
-                if name == 'resources.arsc' or name.startswith(('res/', 'assets/')):
-                    with original.open(name) as a, patched.open(name) as b:
-                        if digest(a) != digest(b):
-                            raise ValueError('resource changed: ' + name)
-                    checked += 1
-                elif name in dex:
-                    a, b = original.read(name), patched.read(name)
-                    if not b.startswith(b'dex\n'):
-                        raise ValueError('invalid rebuilt DEX: ' + name)
-                    changed += a != b
-            if not changed:
-                raise ValueError('no DEX changes')
+        checked, changed = check_rebuilt(base, root / 'patched-unsigned.apk')
         result.update(status='offline Java integration passed', changed_dex=changed,
                       unchanged_resource_entries=checked)
     except Exception as exc:

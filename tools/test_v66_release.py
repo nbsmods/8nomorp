@@ -54,6 +54,28 @@ def run(command, root, name, env):
         raise ValueError(name + ' failed; see ' + str(root / (name + '.log')))
 
 
+def check_rebuilt(base, rebuilt):
+    checked, changed = 0, 0
+    with zipfile.ZipFile(base) as original, zipfile.ZipFile(rebuilt) as patched:
+        dex = {name for name in original.namelist() if re.fullmatch(r'classes(?:\d+)?\.dex', name)}
+        if dex != {name for name in patched.namelist() if re.fullmatch(r'classes(?:\d+)?\.dex', name)}:
+            raise ValueError('DEX entry set changed')
+        for name in original.namelist():
+            if name == 'resources.arsc' or name.startswith(('res/', 'assets/')):
+                with original.open(name) as a, patched.open(name) as b:
+                    if digest(a) != digest(b):
+                        raise ValueError('resource changed: ' + name)
+                checked += 1
+            elif name in dex:
+                a, b = original.read(name), patched.read(name)
+                if not b.startswith(b'dex\n'):
+                    raise ValueError('invalid rebuilt DEX: ' + name)
+                changed += a != b
+    if not changed:
+        raise ValueError('no DEX changes')
+    return checked, changed
+
+
 def test(args):
     # resolve executable before changing the subprocess environment
     tool = args.tool.resolve(strict=True)
@@ -78,23 +100,9 @@ def test(args):
     candidates = context_captures((root / 'all.log').read_text(), root)
     run([args.apktool, 'b', root / 'patched', '-o', root / 'patched-unsigned.apk'],
         root, 'build', env)
-    with zipfile.ZipFile(base) as original, zipfile.ZipFile(root / 'patched-unsigned.apk') as patched:
-        checked = 0
-        changed_dex = 0
-        for name in original.namelist():
-            if name == 'resources.arsc' or name.startswith(('res/', 'assets/')):
-                with original.open(name) as a, patched.open(name) as b:
-                    if digest(a) != digest(b):
-                        raise ValueError('resource changed: ' + name)
-                checked += 1
-            elif name.startswith('classes') and name.endswith('.dex'):
-                # Reading the entries also verifies their ZIP CRCs.
-                a, b = original.read(name), patched.read(name)
-                if not b.startswith(b'dex\n'):
-                    raise ValueError('invalid rebuilt DEX: ' + name)
-                changed_dex += a != b
-        if changed_dex != 2:
-            raise ValueError('expected both v66 DEX files to be patched')
+    checked, changed_dex = check_rebuilt(base, root / 'patched-unsigned.apk')
+    if changed_dex != 2:
+        raise ValueError('expected both v66 DEX files to be patched')
     result = {
         'fixture': '66.300', 'status': 'offline integration passed',
         'fresh_context_candidates': len(candidates), 'changed_dex': changed_dex,

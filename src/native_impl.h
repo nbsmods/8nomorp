@@ -267,40 +267,47 @@ static int native_write_new(const char *path,const void *data,size_t length){
     if(close(fd)){unlink(path);return -1;}return 0;
 }
 static void native_free_image(emu_t *image){
-    for(int i=0;i<image->nsyms;i++)free(image->symnames[i]);
+    if(image->symnames)for(int i=0;i<image->nsyms;i++)free(image->symnames[i]);
     free(image->symnames);free(image->raw);free(image->apk);apk_metadata_free(&image->package);
 }
-int ctxgen_native_unpack(const char *game_path,const char *shield_path,const char *apk_path,const char *outdir,int verbose){
-    emu_t *host=calloc(1,sizeof *host),*game=calloc(1,sizeof *game);uint8_t *out=NULL,*reference=NULL;int result=-1;
-    if(!host||!game){free(host);free(game);return -1;}g_verbose=verbose;
-    struct stat st;
-    if(!lstat(outdir,&st)||errno!=ENOENT){fprintf(stderr,"error: native output directory must not exist\n");goto done;}
-    if(native_blob(game_path,&game->raw,&game->raw_len)||native_blob(shield_path,&host->raw,&host->raw_len)||
-        native_blob(apk_path,&host->apk,&host->apk_len)){fprintf(stderr,"error: cannot read native inputs\n");goto done;}
-    if(apk_read_metadata(host->apk,host->apk_len,&host->package)||elf_load(host)||elf_load(game))goto done;
-    const char *shield_name=strrchr(shield_path,'/');
-    host->image_name=shield_name?shield_name+1:shield_path;
-    elf_syms(host);elf_syms(game);
-    if(!host->nsyms||!game->nsyms)goto done;
-    for(int i=0;i<host->nsegs;i++)if(host->segs[i].va>=0x1000000||host->segs[i].memsz>0x1000000-host->segs[i].va)goto done;
-    for(int i=0;i<game->nsegs;i++)if(game->segs[i].va>=0x2000000||game->segs[i].memsz>0x2000000-game->segs[i].va)goto done;
-    if(uc_open(UC_ARCH_ARM64,UC_MODE_LITTLE_ENDIAN,&host->uc)||emu_map(host)||apply_relocations(host))goto done;
-    game->uc=host->uc;game->load_bias=0x1000000;game->imports=host;
-    const char *base_name=strrchr(game_path,'/');
-    game->image_name=base_name?base_name+1:game_path;host->peer=game;
-    if(emu_map(game)||apply_relocations(game))goto done;
+static const char *native_name(const char *path){const char *p=strrchr(path,'/');return p?p+1:path;}
+static int native_load(emu_t *host,const char *shield,const char *apk,emu_t *game,const char *library){
+    if(native_blob(shield,&host->raw,&host->raw_len)||native_blob(apk,&host->apk,&host->apk_len)||
+       apk_read_metadata(host->apk,host->apk_len,&host->package)||elf_load(host))return -1;
+    host->image_name=native_name(shield);elf_syms(host);if(!host->nsyms)return -1;
+    if(game){
+        if(native_blob(library,&game->raw,&game->raw_len)||elf_load(game))return -1;
+        game->image_name=native_name(library);elf_syms(game);if(!game->nsyms)return -1;
+        for(int i=0;i<host->nsegs;i++)if(host->segs[i].va>=0x1000000||host->segs[i].memsz>0x1000000-host->segs[i].va)return -1;
+        for(int i=0;i<game->nsegs;i++)if(game->segs[i].va>=0x2000000||game->segs[i].memsz>0x2000000-game->segs[i].va)return -1;
+    }
+    if(uc_open(UC_ARCH_ARM64,UC_MODE_LITTLE_ENDIAN,&host->uc)||emu_map(host)||apply_relocations(host))return -1;
+    if(game){
+        game->uc=host->uc;game->load_bias=0x1000000;game->imports=host;host->peer=game;
+        if(emu_map(game)||apply_relocations(game))return -1;
+    }
     uint64_t tls=TLS_BASE,canary=0x1122334455667788ULL;
     uc_reg_write(host->uc,UC_ARM64_REG_TPIDR_EL0,&tls);uc_mem_write(host->uc,TLS_BASE+0x28,&canary,8);
     host->heap_next=HEAP_BASE+0x1000;host->mmap_next=MMAP_BASE;host->errno_addr=MISC_BASE+0x1000;
     host->next_fd=0x200;host->file_next=MISC_BASE+0x4000;host->startup_budget=3000000000ULL;
-    native_probe_state_t probes={0};probes.host=host;
+    return 0;
+}
+static int native_boot(emu_t *host,emu_t *game,native_probe_state_t *probes){
+    memset(probes,0,sizeof *probes);probes->host=host;
     uc_hook observer;
-    if(uc_hook_add(host->uc,&observer,UC_HOOK_BLOCK,native_probe_observer,&probes,1,0))goto done;
+    if(game&&uc_hook_add(host->uc,&observer,UC_HOOK_BLOCK,native_probe_observer,probes,1,0))return -1;
     if(run_unpack(host)||host->stop||rdreg(host->uc,R_PC)!=SENT_JNI||rdreg(host->uc,R_X0)!=0x10002){
         fprintf(stderr,"error: shield initialization did not complete (stop=%d, pc=0x%llx, JNI version=0x%llx)\n",
-                host->stop,(unsigned long long)rdreg(host->uc,R_PC),(unsigned long long)rdreg(host->uc,R_X0));goto done;
+                host->stop,(unsigned long long)rdreg(host->uc,R_PC),(unsigned long long)rdreg(host->uc,R_X0));return -1;
     }
-    if(native_constructor(host,game->load_bias+dyn_value(game,12)))goto done;
+    return game?native_constructor(host,game->load_bias+dyn_value(game,12)):0;
+}
+int ctxgen_native_unpack(const char *game_path,const char *shield_path,const char *apk_path,const char *outdir,int verbose){
+    emu_t *host=calloc(1,sizeof *host),*game=calloc(1,sizeof *game);uint8_t *out=NULL,*reference=NULL;int result=-1;
+    if(!host||!game){free(host);free(game);return -1;}g_verbose=verbose;
+    struct stat st;native_probe_state_t probes;
+    if(!lstat(outdir,&st)||errno!=ENOENT){fprintf(stderr,"error: native output directory must not exist\n");goto done;}
+    if(native_load(host,shield_path,apk_path,game,game_path)||native_boot(host,game,&probes))goto done;
     fprintf(stderr,"[*] libg native loader returned; recovering protected call targets\n");
     out=malloc(game->raw_len);if(!out)goto done;memcpy(out,game->raw,game->raw_len);
     size_t changed=0;
@@ -359,31 +366,25 @@ static int native_jni_call(emu_t *e,uint64_t function,uint64_t a2,uint64_t a3){
     }
     return -1;
 }
+static int native_method(const emu_t *e,const char *owner,const char *signature,uint64_t *function){
+    unsigned count=0;
+    for(unsigned i=0;i<e->nnatives;i++)if((!owner||!strcmp(e->natives[i].owner,owner))&&
+       !strcmp(e->natives[i].signature,signature)){*function=e->natives[i].function;count++;}
+    return count==1?0:-1;
+}
+static int native_register(emu_t *e,const char *owner,uint32_t id,const char *signature,uint64_t *function){
+    uint64_t registrar;
+    if(native_method(e,NULL,"(Ljava/lang/Class;I)V",&registrar))return -1;
+    uint64_t clazz=heap_alloc(e,strlen(owner)+1,0);if(!clazz)return -1;write_cstr(e,clazz,owner);
+    return native_jni_call(e,registrar,clazz,id)||native_method(e,owner,signature,function)?-1:0;
+}
 int ctxgen_strings(const char *shield,const char *apk,const char *owner,uint32_t registration,const char *ids,const char *output){
     emu_t *e=calloc(1,sizeof *e);FILE *in=NULL,*out=NULL;int result=-1;char *value=NULL;
     if(!e)return -1;
     struct stat st;if(!lstat(output,&st)||errno!=ENOENT)goto done;
-    if(native_blob(shield,&e->raw,&e->raw_len)||native_blob(apk,&e->apk,&e->apk_len)||
-       apk_read_metadata(e->apk,e->apk_len,&e->package)||elf_load(e))goto done;
-    const char *base=strrchr(shield,'/');e->image_name=base?base+1:shield;
-    elf_syms(e);
-    if(uc_open(UC_ARCH_ARM64,UC_MODE_LITTLE_ENDIAN,&e->uc)||emu_map(e)||apply_relocations(e))goto done;
-    uint64_t tls=TLS_BASE,canary=0x1122334455667788ULL;
-    uc_reg_write(e->uc,UC_ARM64_REG_TPIDR_EL0,&tls);uc_mem_write(e->uc,TLS_BASE+0x28,&canary,8);
-    e->heap_next=HEAP_BASE+0x1000;e->mmap_next=MMAP_BASE;e->errno_addr=MISC_BASE+0x1000;
-    e->next_fd=0x200;e->file_next=MISC_BASE+0x4000;e->startup_budget=3000000000ULL;
-    if(run_unpack(e)||e->stop||rdreg(e->uc,R_PC)!=SENT_JNI||rdreg(e->uc,R_X0)!=0x10002)goto done;
-    uint64_t registrar=0;unsigned matches=0;
-    for(unsigned i=0;i<e->nnatives;i++)if(!strcmp(e->natives[i].signature,"(Ljava/lang/Class;I)V")){
-        registrar=e->natives[i].function;matches++;
-    }
-    if(matches!=1)goto done;
-    uint64_t clazz=heap_alloc(e,strlen(owner)+1,0);write_cstr(e,clazz,owner);
-    if(native_jni_call(e,registrar,clazz,registration))goto done;
-    uint64_t function=0;matches=0;
-    for(unsigned i=0;i<e->nnatives;i++)if(!strcmp(e->natives[i].owner,owner)&&
-        !strcmp(e->natives[i].signature,"(I)Ljava/lang/String;")){function=e->natives[i].function;matches++;}
-    if(matches!=1)goto done;
+    native_probe_state_t probes;uint64_t function;
+    if(native_load(e,shield,apk,NULL,NULL)||native_boot(e,NULL,&probes)||
+       native_register(e,owner,registration,"(I)Ljava/lang/String;",&function))goto done;
     in=fopen(ids,"r");if(!in)goto done;
     int fd=open(output,O_WRONLY|O_CREAT|O_EXCL,0644);if(fd<0)goto done;
     out=fdopen(fd,"w");if(!out){close(fd);unlink(output);goto done;}

@@ -64,6 +64,26 @@ class RunnerTests(unittest.TestCase):
                             root, 'step', os.environ.copy())
             self.assertIn('diagnostic', (root / 'step.log').read_text())
 
+    def test_rebuilt_archive_checks(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base, rebuilt = (Path(tmp) / name for name in ('base.apk', 'rebuilt.apk'))
+            entries = {'classes.dex': b'dex\noriginal', 'resources.arsc': b'resources', 'assets/file': b'asset'}
+            def write(path, content):
+                with zipfile.ZipFile(path, 'w') as archive:
+                    for name, data in content.items():
+                        archive.writestr(name, data)
+            write(base, entries)
+            changed = dict(entries, **{'classes.dex': b'dex\npatched'})
+            write(rebuilt, changed)
+            self.assertEqual(release.check_rebuilt(base, rebuilt), (2, 1))
+            for content, error in [(entries, 'no DEX changes'),
+                                   (dict(changed, **{'classes2.dex': b'dex\nextra'}), 'entry set'),
+                                   (dict(changed, **{'classes.dex': b'invalid'}), 'invalid rebuilt'),
+                                   (dict(changed, **{'assets/file': b'changed'}), 'resource changed')]:
+                write(rebuilt, content)
+                with self.assertRaisesRegex(ValueError, error):
+                    release.check_rebuilt(base, rebuilt)
+
 
 if __name__ == '__main__':
     unittest.main()

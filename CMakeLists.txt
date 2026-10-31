@@ -9,6 +9,7 @@ add_executable(8nomorp
     src/main.c
     src/lbts.c
     src/promon.c
+    src/attestation.c
 )
 target_include_directories(8nomorp PRIVATE src)
 

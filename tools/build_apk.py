@@ -15,6 +15,7 @@ from assemble import manifest_root
 from games import shield_for
 from sparse_strings import recover as recover_sparse_strings
 from resource_splits import merge_resources
+import attestation_patch
 
 
 def protected_loader(data):
@@ -84,8 +85,12 @@ def run(args):
                         path.write_bytes(archive.read(name))
                         args.resource_split.append(path)
         with zipfile.ZipFile(args.base) as archive:
-            package = manifest_root(archive.read('AndroidManifest.xml'))[1].get('package')
+            metadata = manifest_root(archive.read('AndroidManifest.xml'))[1]
+            package = metadata.get('package')
         shield_name = shield_for(package)
+        attest = attestation_patch.enabled(metadata, getattr(args, 'attestation', None))
+        if attest:
+            attestation_patch.compiler(getattr(args, 'android_cc', None))
         if not args.dat:
             with zipfile.ZipFile(args.base) as archive:
                 candidates = []
@@ -126,10 +131,14 @@ def run(args):
         run_cmd([str(binary), 'all', str(args.dat), str(decoded), str(patched),
                  '--so', str(args.shield)])
         recover_sparse_strings(binary, args.shield, args.base, decoded, patched, work, run_cmd)
+        replacements = []
+        if attest:
+            bridge = attestation_patch.build(binary, game, args.shield, args.base, decoded, patched,
+                                             work, run_cmd, getattr(args, 'android_cc', None))
+            replacements += ['--add-library', 'libattestation.so=' + str(bridge)]
         run_cmd([args.apktool, 'b', str(patched), '-o', str(patched_base)], env=apktool_env)
         run_cmd([str(binary), 'unpack', str(game), str(args.shield),
                  str(args.base), str(native_out)])
-        replacements = []
         for library in dependencies:
             unpacked = work / (library.name + '-unpacked')
             print('Unpacking protected dependency:', library.name, flush=True)
@@ -144,7 +153,7 @@ def run(args):
             merge_resources(unsigned, args.resource_split, merged, args.apk_editor, run_cmd)
             unsigned.unlink()
             merged.rename(unsigned)
-        run_cmd([args.zipalign, '-f', '4', str(unsigned), str(aligned)])
+        run_cmd([args.zipalign, *(['-P', '16'] if attest else []), '-f', '4', str(unsigned), str(aligned)])
         unsigned.unlink()
         if args.keystore:
             command = [args.apksigner, 'sign', '--ks', str(args.keystore),
@@ -189,6 +198,12 @@ def main():
     parser.add_argument('--apktool', default='apktool')
     parser.add_argument('--zipalign', default='zipalign')
     parser.add_argument('--apksigner', default='apksigner')
+    attestation = parser.add_mutually_exclusive_group()
+    attestation.add_argument('--attestation', action='store_true', default=None,
+                             help='add library-derived libattestation.so; automatic for validated Brawl Stars 69.414')
+    attestation.add_argument('--no-attestation', dest='attestation', action='store_false',
+                             help='keep the existing attestation implementation')
+    parser.add_argument('--android-cc', type=Path, help='ARM64 Android NDK compiler (or set ANDROID_NDK_HOME)')
     args = parser.parse_args()
     if args.xapk and any((args.base, args.native_split, args.asset_pack)):
         parser.error('use --xapk OR --base/--native-split/--asset-pack, not both')

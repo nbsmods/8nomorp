@@ -3,6 +3,13 @@
 #include <assert.h>
 
 int main(void){
+    uint8_t request[32];assert(!attest_hex("000102030405060708090a0b0c0d0e0f101112131415161718191A1B1C1D1E1F",request));
+    for(unsigned i=0;i<32;i++)assert(request[i]==i);
+    assert(attest_hex("",request));assert(attest_hex("gg0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",request));
+    uint8_t seed[8],again[8];assert(!attest_seed("deterministic",request,UINT64_MAX,seed));
+    assert(!attest_seed("deterministic",request,UINT64_MAX,again));assert(!memcmp(seed,again,8));
+    assert(!attest_seed("0102030405060708",request,0,seed));for(unsigned i=0;i<8;i++)assert(seed[i]==i+1);
+    assert(attest_seed("bad",request,0,seed));assert(!attest_seed("random",request,0,seed));
     emu_t *e=calloc(1,sizeof *e);assert(e);
     assert(uc_open(UC_ARCH_ARM64,UC_MODE_LITTLE_ENDIAN,&e->uc)==UC_ERR_OK);
     assert(uc_mem_map(e->uc,0x10000,0x10000,UC_PROT_ALL)==UC_ERR_OK);
@@ -66,6 +73,16 @@ int main(void){
     dispatch_import(e,"asprintf");assert(rdreg(e->uc,R_X0)==17);
     uint64_t allocated=0;uc_mem_read(e->uc,0x13000,&allocated,8);
     uc_mem_read(e->uc,allocated,buffer,sizeof buffer);assert(!strcmp(buffer,"/proc/1234/status"));
+    /* Byte-array JNI calls preserve bytes, slices, and direct element access. */
+    wrreg(e->uc,R_X1,32);dispatch_import(e,"jni_176");uint64_t array=rdreg(e->uc,R_X0);assert(array);
+    uint8_t sample[]={0,0x80,0xff,7},actual[4]={0};uc_mem_write(e->uc,0x14000,sample,4);
+    wrreg(e->uc,R_X1,array);wrreg(e->uc,R_X2,3);wrreg(e->uc,UC_ARM64_REG_X3,4);wrreg(e->uc,UC_ARM64_REG_X4,0x14000);
+    dispatch_import(e,"jni_208");uc_mem_read(e->uc,array+11,actual,4);assert(!memcmp(sample,actual,4));
+    wrreg(e->uc,UC_ARM64_REG_X4,0x14100);dispatch_import(e,"jni_200");
+    uc_mem_read(e->uc,0x14100,actual,4);assert(!memcmp(sample,actual,4));
+    wrreg(e->uc,R_X2,0x14200);dispatch_import(e,"jni_184");assert(rdreg(e->uc,R_X0)==array+8);
+    uint8_t copy=1;uc_mem_read(e->uc,0x14200,&copy,1);assert(!copy);
+    wrreg(e->uc,R_X2,31);wrreg(e->uc,UC_ARM64_REG_X3,2);dispatch_import(e,"jni_200");assert(e->stop);e->stop=0;
     /* A main-thread condition wait must yield to a worker, not spin forever. */
     const uint32_t worker[]={0x52800021,0xb9000001,0xd65f03c0}; /* mov w1,1; str w1,[x0]; ret */
     uc_mem_write(e->uc,0x15000,worker,sizeof worker);
@@ -80,6 +97,11 @@ int main(void){
     assert(rdreg(e->uc,R_PC)==0x19000&&rdreg(e->uc,R_X0)==0);
     assert(e->th[0].state==3);
     e->cur_ctx=1;dispatch_import(e,"pthread_cond_wait");assert(!e->yield_workers);
+    e->strict_imports=1;e->stop=0;dispatch_import(e,"unknown_attestation_primitive");assert(e->stop);
+    strcpy(e->natives[0].owner,"fixture/One");strcpy(e->natives[0].signature,"([B)[B");e->natives[0].function=0x1234;e->nnatives=1;
+    uint64_t method=0;assert(!native_method(e,"fixture/One","([B)[B",&method)&&method==0x1234);
+    assert(native_method(e,"fixture/Other","([B)[B",&method));e->natives[1]=e->natives[0];e->nnatives=2;
+    assert(native_method(e,"fixture/One","([B)[B",&method));
     if(e->th[0].cpu)uc_context_free(e->th[0].cpu);
     uc_close(e->uc);free(e);puts("guest runtime regression tests passed");return 0;
 }

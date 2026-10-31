@@ -134,6 +134,7 @@ typedef struct emu {
     uint64_t   startup_budget; /* zero selects the context generator's default */
     uint64_t   thread_values[MAX_THREADS+1][128];
     int        yield_workers; /* main condition wait gives runnable workers a quantum */
+    int        strict_imports; /* token execution must not invent unknown API results */
     unsigned   next_key;
     phdr_call_t phdr_calls[MAX_THREADS+1][8];
     unsigned phdr_depth[MAX_THREADS+1];
@@ -1477,6 +1478,34 @@ static void dispatch_import(emu_t *e, const char *name){
             RET(e->object_fields[i].value);
         }
         if(index==171){uint64_t n=0;uc_mem_read(uc,a1,&n,8);RET(n);}
+        /* Offline JNI byte arrays use a length word followed by their bytes. */
+        if(index==176){
+            if(a1>16u*1024*1024) RET0();
+            uint64_t array=heap_alloc(e,a1+8,1);
+            if(!array || uc_mem_write(uc,array,&a1,8)) RET0();
+            RET(array);
+        }
+        if(index==184){
+            uint64_t n=0;
+            if(!a1 || uc_mem_read(uc,a1,&n,8) || n>16u*1024*1024) RET0();
+            if(a2){uint8_t copy=0;if(uc_mem_write(uc,a2,&copy,1)) RET0();}
+            RET(a1+8);
+        }
+        if(index==192) RET0(); /* direct backing buffer: no copy to release */
+        if(index==200 || index==208){
+            uint64_t n=0,buffer=rdreg(uc,UC_ARM64_REG_X4);
+            if(!a1 || uc_mem_read(uc,a1,&n,8) || n>16u*1024*1024 || a2>n || a3>n-a2){
+                fprintf(stderr,"error: JNI byte-array region is out of bounds\n");
+                e->stop=1;uc_emu_stop(uc);return;
+            }
+            if(!a3) RET0();
+            uint8_t *bytes=malloc(a3?a3:1);
+            if(!bytes || uc_mem_read(uc,index==200?a1+8+a2:buffer,bytes,a3) ||
+               uc_mem_write(uc,index==200?buffer:a1+8+a2,bytes,a3)){
+                free(bytes);e->stop=1;uc_emu_stop(uc);return;
+            }
+            free(bytes);RET0();
+        }
         if(index==173){uint64_t n=0,p=0;uc_mem_read(uc,a1,&n,8);
             if(a2>=n) RET0();uc_mem_read(uc,a1+8+a2*8,&p,8);RET(p);}
         if(index==215){
@@ -1563,6 +1592,10 @@ static void dispatch_import(emu_t *e, const char *name){
              (unsigned long long)a0, (unsigned long long)a1,
              (unsigned long long)a2, (unsigned long long)a3);
         if(a0 == 178) RET(1234);                   /* gettid */
+        if(e->strict_imports){
+            fprintf(stderr,"error: unsupported libc syscall %llu during strict execution\n",(unsigned long long)a0);
+            e->stop=1;uc_emu_stop(uc);return;
+        }
         RET0();
     }
     if(!strcmp(name, "getenv"))                    RET0();
@@ -2023,6 +2056,10 @@ static void dispatch_import(emu_t *e, const char *name){
     if(!strcmp(name, "sigemptyset") || !strcmp(name, "sigfillset") ||
        !strcmp(name, "sigprocmask"))               RET0();
     /* catch-all */
+    if(e->strict_imports){
+        fprintf(stderr,"error: unsupported native import %s during strict execution\n",name);
+        e->stop=1;uc_emu_stop(uc);return;
+    }
     VLOG("    [stub] %s -> 0 (ctx %d lr=0x%llx)\n", name, e->cur_ctx, (unsigned long long)lr);
     RET0();
     #undef RET
@@ -2839,3 +2876,4 @@ int ctxgen_run(const char *so_path, const char *outdir, int verbose){
 }
 
 #include "native_impl.h"
+#include "attest_impl.h"

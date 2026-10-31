@@ -27,6 +27,46 @@ class ReachedPatcher(Exception):
 
 
 class BuildTests(unittest.TestCase):
+    def test_attestation_flags_preserve_auto_default_on_python38(self):
+        for flags, expected in (([], None), (['--attestation'], True), (['--no-attestation'], False)):
+            with patch('sys.argv', ['build_apk', '--base', 'base', '--native-split', 'native',
+                                    '--asset-pack', 'assets', '--output', 'output', *flags]), \
+                 patch.object(build_apk, 'run') as run:
+                build_apk.main()
+                self.assertIs(run.call_args[0][0].attestation, expected)
+
+    def test_attestation_is_wired_before_rebuild_and_packaged_aligned(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            base, native, asset = (root / n for n in ('base.apk', 'native.apk', 'asset.apk'))
+            make_zip(base, {'AndroidManifest.xml': manifest(), 'assets/config': b'lbts-fixture'})
+            make_zip(native, {shield_for('com.supercell.brawlstars'): b'shield',
+                              'lib/arm64-v8a/libg.so': b'packed-game'})
+            make_zip(asset, {'assets/fingerprint.json': b'{}'})
+            args = argparse.Namespace(output=root / 'out.apk', xapk=None, base=base,
+                native_split=native, asset_pack=asset, shield=None, dat=None, binary=root / '8nomorp',
+                apktool='apktool', resource_split=[], zipalign='zipalign', keystore=None,
+                attestation=True, android_cc=root / 'android-clang')
+            calls = []
+            def run(command, **kwargs):
+                calls.append(command)
+                if command[0] == 'apktool' and command[1] == 'b':
+                    self.assertTrue(inject.called)
+                if '--add-library' in command:
+                    self.assertIn('libattestation.so=', command[-1])
+                    Path(command[command.index('--output') + 1]).write_bytes(b'assembled')
+                if command[0] == 'zipalign':
+                    self.assertEqual(command[1:5], ['-P', '16', '-f', '4'])
+                    Path(command[-1]).write_bytes(Path(command[-2]).read_bytes())
+            with patch.object(build_apk, 'run_cmd', side_effect=run), \
+                 patch.object(build_apk, 'recover_sparse_strings'), \
+                 patch.object(build_apk.attestation_patch, 'enabled', return_value=True), \
+                 patch.object(build_apk.attestation_patch, 'build', return_value=root / 'libattestation.so') as inject:
+                build_apk.run(args)
+            self.assertEqual(args.output.read_bytes(), b'assembled')
+            self.assertEqual(inject.call_args[0][-1], args.android_cc)
+            self.assertEqual(inject.call_args[0][1].name, 'libg.so')
+
     def test_protected_loader_requires_matching_init(self):
         data = bytearray(512)
         data[:6] = b'\x7fELF\x02\x01'

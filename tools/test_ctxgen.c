@@ -11,6 +11,46 @@ static int64_t syscall_result(emu_t *e, uint64_t nr, uint64_t a0, uint64_t a1){
 }
 static void put64(uint8_t *p,size_t off,uint64_t v){memcpy(p+off,&v,8);}
 static void put32(uint8_t *p,size_t off,uint32_t v){memcpy(p+off,&v,4);}
+static void test_attestation_codec(void){
+    emu_t *e=calloc(1,sizeof *e);uint8_t image[512]={0};uint64_t multiplier;
+    e->raw_len=sizeof image;e->nsegs=1;e->segs[0]=(seg_t){.va=0x9000,.off=0,.filesz=sizeof image,.flags=5};
+    uint32_t inverse[]={0x9280018b,0xd100214a,0xf940014c,0xf85f8d4d,0xd503201f,0x9b0b31ac,0xf829790c,0xf1000529,0x54ffff41};
+    uint32_t forward[]={0x528001b8,0xf9400268,0xf8777a89,0xf8777908,0xd503201f,0x9b182508};
+    memcpy(image+64,inverse,sizeof inverse);memcpy(image+160,forward,sizeof forward);
+    assert(!attest_codec_image(e,image,&multiplier)&&multiplier==13);
+    /* Alter the build's literal; discovery must follow it, not the sample. */
+    put32(image,64,0x9280000b|(28u<<5));put32(image,160,0x52800018|(29u<<5));
+    assert(!attest_codec_image(e,image,&multiplier)&&multiplier==29);
+    for(unsigned i=0;i<sizeof inverse/sizeof inverse[0];i++){
+        uint32_t saved=rd32(image,64+i*4);put32(image,64+i*4,0);assert(attest_codec_image(e,image,&multiplier));put32(image,64+i*4,saved);
+    }
+    memcpy(image+256,image+64,sizeof inverse);assert(attest_codec_image(e,image,&multiplier));memset(image+256,0,sizeof inverse);
+    put32(image,160,0);assert(attest_codec_image(e,image,&multiplier));free(e);
+}
+static void capture_hash(emu_t *e,attest_capture *capture,const uint8_t iv[32],const uint8_t *data,size_t length,uint8_t digest[32],int corrupt){
+    uint8_t ctx[112]={0};memcpy(ctx,iv,32);put64(ctx,32,64*8);uc_mem_write(e->uc,0x11000,ctx,sizeof ctx);uc_mem_write(e->uc,0x12000,data,length);
+    wrreg(e->uc,R_X0,0x11000);wrreg(e->uc,R_X1,0x12000);wrreg(e->uc,R_X2,length);
+    attest_capture_code(e->uc,0x10000,4,capture);
+    wrreg(e->uc,R_X0,0x13000);wrreg(e->uc,R_X1,0x11000);wrreg(e->uc,R_X2,0);
+    attest_capture_code(e->uc,0x10004,4,capture);
+    attestation_custom_sha(iv,data,length,digest);digest[0]^=(uint8_t)corrupt;uc_mem_write(e->uc,0x13000,digest,32);
+    attest_capture_code(e->uc,0x10008,4,capture);
+}
+static void test_attestation_capture(void){
+    emu_t *e=calloc(1,sizeof *e);assert(!uc_open(UC_ARCH_ARM64,UC_MODE_LITTLE_ENDIAN,&e->uc));
+    assert(!uc_mem_map(e->uc,0x10000,0x10000,UC_PROT_ALL));e->nsegs=1;e->segs[0]=(seg_t){.va=0x10000,.filesz=0x1000,.flags=5};
+    uint32_t calls[]={0x94000100,0x940001ff,0};uc_mem_write(e->uc,0x10000,calls,sizeof calls);
+    uint8_t first[32],second[32],digest[32],next[32],input[9]={0};
+    for(unsigned i=0;i<32;i++){first[i]=(uint8_t)(i+1);second[i]=(uint8_t)(255-i);}
+    attest_capture capture={0};capture.host=e;attestation_material material;
+    capture_hash(e,&capture,first,input,sizeof input,digest,1);assert(attest_capture_material(&capture,&material));
+    capture_hash(e,&capture,first,input,sizeof input,digest,0);assert(attest_capture_material(&capture,&material));
+    capture_hash(e,&capture,second,digest,32,next,0);assert(!attest_capture_material(&capture,&material));
+    assert(!memcmp(material.primary,first,32)&&!memcmp(material.secondary,second,32));
+    capture.edges[1][0]=1;assert(attest_capture_material(&capture,&material));capture.edges[1][0]=0;
+    capture.failed=1;assert(attest_capture_material(&capture,&material));
+    uc_close(e->uc);free(e);
+}
 static void test_native_segment_targets(void){
     emu_t *game=calloc(1,sizeof *game);assert(game);
     game->load_bias=0x1000000;game->nsegs=3;
@@ -241,6 +281,8 @@ static void test_inflate_bridge(void){
     emu_free(e);free(e);
 }
 int main(void){
+    test_attestation_codec();
+    test_attestation_capture();
     test_native_segment_targets();
     test_native_direct_resolver();
     test_native_discovery();

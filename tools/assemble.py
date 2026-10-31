@@ -191,6 +191,14 @@ def assemble(args):
             if not separator or Path(name).name != name or not name.endswith('.so') or key not in selected or key in replacements:
                 raise ValueError('invalid or duplicate native replacement: ' + name)
             replacements[key] = Path(path)
+        additions = {}
+        for value in getattr(args, 'add_library', []):
+            name, separator, path = value.partition('=')
+            key = 'lib/arm64-v8a/' + name
+            if (not separator or Path(name).name != name or not name.startswith('lib') or
+                    not name.endswith('.so') or key in selected or key in additions or key in SHIELDS):
+                raise ValueError('invalid or duplicate native addition: ' + name)
+            additions[key] = Path(path)
         manifest = standalone_manifest(base.read('AndroidManifest.xml'))
         output = Path(args.output)
         # Refuse existing output, including symlinks. Only delete our own partial output.
@@ -209,6 +217,8 @@ def assemble(args):
                     else:
                         with archive.open(name) as source, out.open(info, 'w') as dest:
                             shutil.copyfileobj(source, dest, 1024 * 1024)
+                for name, path in additions.items():
+                    out.write(path, name, compress_type=zipfile.ZIP_STORED)
         except BaseException:
             output.unlink()
             raise
@@ -221,6 +231,7 @@ def main():
     for name in ('original-base', 'base', 'native-split', 'asset-pack', 'library', 'output'):
         parser.add_argument('--' + name, required=True)
     parser.add_argument('--extra-library', action='append', default=[], metavar='NAME=PATH')
+    parser.add_argument('--add-library', action='append', default=[], metavar='NAME=PATH')
     args = parser.parse_args()
     try:
         assemble(args)
