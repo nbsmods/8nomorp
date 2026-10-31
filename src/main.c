@@ -17,6 +17,7 @@
 
 #ifdef WITH_UNICORN
 int ctxgen_run(const char *so_path, const char *outdir, int verbose);
+int ctxgen_run_apk(const char *so_path,const char *outdir,int verbose,const char *apk);
 int ctxgen_native_unpack(const char *game,const char *shield,const char *apk,const char *outdir,int verbose);
 int ctxgen_attest(const char *game,const char *shield,const char *apk,const char *owner,uint32_t registration,const char *requests,const char *time,const char *seed,int verbose);
 int ctxgen_strings(const char *shield,const char *apk,const char *owner,uint32_t registration,const char *ids,const char *output);
@@ -498,12 +499,18 @@ static int cmd_context(int argc, char **argv){
     return 2;
 #else
     if(argc < 3){
-        fprintf(stderr,"usage: 8nomorp context <shield.so> [outdir]\n");
+        fprintf(stderr,"usage: 8nomorp context <shield.so> [outdir] [--apk base.apk]\n");
         return 2;
     }
     const char *so = argv[2];
-    const char *outdir = argc > 3 ? argv[3] : "ctxgen";
-    int n = ctxgen_run(so, outdir, getenv("CTXGEN_VERBOSE") != NULL);
+    const char *outdir=NULL,*apk=NULL;
+    for(int i=3;i<argc;i++){
+        if(!strcmp(argv[i],"--apk")&&!apk&&i+1<argc)apk=argv[++i];
+        else if(argv[i][0]!='-'&&!outdir)outdir=argv[i];
+        else {fprintf(stderr,"error: invalid context arguments\n");return 2;}
+    }
+    if(!outdir)outdir="ctxgen";
+    int n = ctxgen_run_apk(so, outdir, getenv("CTXGEN_VERBOSE") != NULL,apk);
     if(n < 0) return 3;
     printf("%d candidate context(s) in %s\n", n, outdir);
     return n ? 0 : 3;
@@ -511,9 +518,9 @@ static int cmd_context(int argc, char **argv){
 }
 
 static int cmd_decrypt(int argc, char **argv){
-    if(argc<3){ fprintf(stderr,"usage: 8nomorp decrypt <input.dat> [output] [--context context.bin] [--json config.json] [--so shield.so]\n"); return 2; }
+    if(argc<3){ fprintf(stderr,"usage: 8nomorp decrypt <input.dat> [output] [--context context.bin] [--json config.json] [--so shield.so] [--apk base.apk]\n"); return 2; }
     const char *in = argv[2];
-    const char *outpath = NULL, *ctxpath = NULL, *jsonpath = NULL, *sopath = NULL;
+    const char *outpath = NULL, *ctxpath = NULL, *jsonpath = NULL, *sopath = NULL,*apkpath=NULL;
     for(int i=3;i<argc;i++){
         if(!strcmp(argv[i],"--context")){
             if(ctxpath || i+1>=argc){ fprintf(stderr,"error: --context requires one file\n"); return 2; }
@@ -524,6 +531,9 @@ static int cmd_decrypt(int argc, char **argv){
         } else if(!strcmp(argv[i],"--so")){
             if(sopath || i+1>=argc){ fprintf(stderr,"error: --so requires one file\n"); return 2; }
             sopath=argv[++i];
+        } else if(!strcmp(argv[i],"--apk")){
+            if(apkpath || i+1>=argc){ fprintf(stderr,"error: --apk requires one file\n"); return 2; }
+            apkpath=argv[++i];
         } else if(!outpath && argv[i][0]!='-') outpath=argv[i];
         else { fprintf(stderr,"error: unexpected argument: %s\n",argv[i]); return 2; }
     }
@@ -608,7 +618,7 @@ static int cmd_decrypt(int argc, char **argv){
             return 2;
         }
         fprintf(stderr,"[*] generating white-box context from %s ...\n",used);
-        int ng = ctxgen_run(used,ctxdir,getenv("CTXGEN_VERBOSE") != NULL);
+        int ng = ctxgen_run_apk(used,ctxdir,getenv("CTXGEN_VERBOSE") != NULL,apkpath);
         if(ng > 0){
             for(int i=0;i<wb.ncand;i++){ free(wb.cand[i]); wb.cand[i]=NULL; }
             wb.ncand=0; wb.context=NULL; wb.ctx_sha_known=0;
@@ -753,21 +763,21 @@ int main(int argc, char **argv){
     if(argc<2 || help){
         FILE *out=help?stdout:stderr;
         fprintf(out,
-            "8nomorp - offline LBTS, Java and ARM64 recovery tools\n\n"
+            "8nomorp - offline LBTS, Java and ARM native recovery\n\n"
             "Usage: 8nomorp COMMAND [arguments]\n\n"
-            "  all      CONFIG DECODED OUTPUT --so SHIELD\n"
+            "  all      CONFIG DECODED OUTPUT --so SHIELD [--apk BASE]\n"
             "           Recover context and patch a decoded APK tree.\n"
             "  patch    CONFIG DECODED OUTPUT --context CONTEXT\n"
             "           Patch with an existing authenticated context.\n"
             "  unpack   LIBRARY SHIELD BASE_APK OUTPUT_DIR\n"
-            "           Recover and verify supported ARM64 resolver calls.\n"
+            "           Recover and verify supported ARM32/ARM64 resolver calls.\n"
             "  attest   LIBRARY SHIELD BASE_APK CLASS REGISTRATION_ID [REQUESTS [TIME SEED]]\n"
             "           Recover build material and generate tokens from 32-byte hex lines.\n"
             "  attest-material LIBRARY SHIELD BASE_APK CLASS REGISTRATION_ID\n"
             "           Export verified library-derived material as JSON.\n"
             "  strings  SHIELD BASE_APK CLASS REGISTRATION_ID IDS OUTPUT\n"
             "           Resolve sparse Promon string IDs through the original native code.\n"
-            "  context  SHIELD [OUTPUT_DIR]\n"
+            "  context  SHIELD [OUTPUT_DIR] [--apk BASE]\n"
             "           Recover runtime context candidates.\n"
             "  decrypt  CONFIG [OUTPUT] [--context CONTEXT] [--so SHIELD] [--json JSON]\n"
             "  info     CONFIG\n"

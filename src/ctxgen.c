@@ -1,8 +1,5 @@
 /*
- * ctxgen.c -- offline white-box context generator for the Promon SHIELD'd
- * libsupercell_brawlstars.so, built on libunicorn (AArch64).
- *
- * C port of tools/unpack.py + tools/probe_live_generator.py.  It runs the
+ * Offline ARM white-box context recovery, built on Unicorn. It runs the
  * protector's own startup (init_array constructor + JNI_OnLoad) inside an
  * emulator, captures the code/rodata regions the constructor decrypts in
  * place, then re-runs the freshly decrypted context generators and captures
@@ -17,6 +14,7 @@
  * Output: one or more candidate context blobs (ctx_<n>.bin).  The caller
  * (`8nomorp decrypt --so ...`) picks the one that authenticates the container.
  */
+#define _GNU_SOURCE
 #define _POSIX_C_SOURCE 200809L
 #include <stdio.h>
 #include <stdlib.h>
@@ -1507,7 +1505,8 @@ static void dispatch_import(emu_t *e, const char *name){
             free(bytes);RET0();
         }
         if(index==173){uint64_t n=0,p=0;uc_mem_read(uc,a1,&n,8);
-            if(a2>=n) RET0();uc_mem_read(uc,a1+8+a2*8,&p,8);RET(p);}
+            if(a2>=n) RET0();
+            uc_mem_read(uc,a1+8+a2*8,&p,8);RET(p);}
         if(index==215){
             char owner[256]="";read_cstr(e,a1,owner,sizeof owner);
             if(a3>256-e->nnatives) RET(-1);
@@ -2667,6 +2666,7 @@ static void emu_free(emu_t *e){
 
 /* run the full offline pipeline; writes ctx_<n>.bin files into outdir.
  * returns number of candidates written, or < 0 on error. */
+static int a32_context_run(const char *so_path,const char *outdir,int verbose);
 int ctxgen_run(const char *so_path, const char *outdir, int verbose){
     g_verbose = verbose;
     if(mkdir(outdir,0755) && errno!=EEXIST){
@@ -2683,6 +2683,9 @@ int ctxgen_run(const char *so_path, const char *outdir, int verbose){
     if(fread(A.raw, 1, (size_t)szl, f) != (size_t)szl){ fclose(f); free(A.raw); return -1; }
     fclose(f);
     A.raw_len = (size_t)szl;
+    if(A.raw_len>=20&&!memcmp(A.raw,"\177ELF\1\1",6)&&A.raw[18]==40&&A.raw[19]==0){
+        free(A.raw);return a32_context_run(so_path,outdir,verbose);
+    }
 
     if(elf_load(&A) < 0){
         fprintf(stderr, "error: not a loadable AArch64 ELF: %s\n", so_path);

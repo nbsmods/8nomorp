@@ -14,7 +14,7 @@ import shutil
 import struct
 import zipfile
 
-from games import SHIELDS
+from games import ABIS, SHIELDS
 
 
 LIBRARY = 'lib/arm64-v8a/libg.so'
@@ -133,9 +133,12 @@ def signature(name):
     return name.upper().startswith('META-INF/') and name.upper().endswith(('.SF', '.RSA', '.DSA', '.EC', '/MANIFEST.MF'))
 
 
-def plan(base, native, assets):
+def plan(base, native, assets, abi='arm64-v8a'):
+    if abi not in ABIS:
+        raise ValueError('unsupported Android ABI: ' + str(abi))
+    prefix = 'lib/' + abi + '/'
     selected = {}
-    for archive, prefix in ((base, ''), (native, 'lib/arm64-v8a/'), (assets, 'assets/')):
+    for archive, prefix in ((base, ''), (native, prefix), (assets, 'assets/')):
         for name, info in entries(archive).items():
             if not name.startswith(prefix) or signature(name):
                 continue
@@ -148,12 +151,14 @@ def plan(base, native, assets):
                         raise ValueError('conflicting ZIP entry: ' + name)
                 continue
             selected[name] = (archive, info)
-    if LIBRARY not in selected or 'assets/fingerprint.json' not in selected:
+    if 'lib/' + abi + '/libg.so' not in selected or 'assets/fingerprint.json' not in selected:
         raise ValueError('native split and complete install-time asset pack are required')
     return selected
 
 
 def assemble(args):
+    abi = getattr(args, 'abi', 'arm64-v8a')
+    library = 'lib/' + abi + '/libg.so'
     with zipfile.ZipFile(args.original_base) as original, zipfile.ZipFile(args.base) as base, zipfile.ZipFile(args.native_split) as native, zipfile.ZipFile(args.asset_pack) as assets:
         entries(original)
         original_manifest = manifest_root(original.read('AndroidManifest.xml'))[1]
@@ -178,23 +183,23 @@ def assemble(args):
                 with original.open(name) as a, base.open(name) as b:
                     if digest(a) != digest(b):
                         raise ValueError('patched base changed original resources: ' + name)
-        selected = plan(base, native, assets)
+        selected = plan(base, native, assets, abi)
         # Apktool drops META-INF by default. ServiceLoader descriptors are
         # runtime inputs (not signing metadata), notably Kotlin's dispatcher.
         for name, info in entries(original).items():
             if name.startswith('META-INF/') and not signature(name):
                 selected[name] = (original, info)
-        replacements = {LIBRARY: Path(args.library)}
+        replacements = {library: Path(args.library)}
         for value in getattr(args, 'extra_library', []):
             name, separator, path = value.partition('=')
-            key = 'lib/arm64-v8a/' + name
+            key = 'lib/' + abi + '/' + name
             if not separator or Path(name).name != name or not name.endswith('.so') or key not in selected or key in replacements:
                 raise ValueError('invalid or duplicate native replacement: ' + name)
             replacements[key] = Path(path)
         additions = {}
         for value in getattr(args, 'add_library', []):
             name, separator, path = value.partition('=')
-            key = 'lib/arm64-v8a/' + name
+            key = 'lib/' + abi + '/' + name
             if (not separator or Path(name).name != name or not name.startswith('lib') or
                     not name.endswith('.so') or key in selected or key in additions or key in SHIELDS):
                 raise ValueError('invalid or duplicate native addition: ' + name)
@@ -228,6 +233,7 @@ def assemble(args):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--abi', choices=ABIS, default='arm64-v8a')
     for name in ('original-base', 'base', 'native-split', 'asset-pack', 'library', 'output'):
         parser.add_argument('--' + name, required=True)
     parser.add_argument('--extra-library', action='append', default=[], metavar='NAME=PATH')

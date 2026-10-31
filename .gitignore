@@ -1,12 +1,8 @@
 # build artifacts
 *.o
+*.d
 /lbts
 /8nomorp
-/test-promon
-/test-ctxgen
-/test-apk
-/test-guest-runtime
-/probe-native
 /build/
 /ext/
 /ctxgen/
@@ -14,7 +10,6 @@ __pycache__/
 *.pyc
 *.out
 *.err
-test
 
 # libraries and packages
 *.so
@@ -37,7 +32,6 @@ test
 *.bin
 *.log
 unpack_out/
-tools/unpack_out/
 targets/*/apks/
 targets/*/extracted/
 targets/*/*.bin
@@ -48,9 +42,6 @@ targets/*/*.bin
 *.id2
 *.nam
 *.til
-tools/ctxscan
-tools/enum16
-tools/enumruns
 
 
 # dex patcher
